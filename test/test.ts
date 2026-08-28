@@ -2392,6 +2392,23 @@ describe("subagent interruption", () => {
     }
   });
 
+  it("reserves unique names even when callers explicitly reuse a cosmetic name", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const reserved = testApi.reservedNames as Set<string>;
+    runningMap.clear();
+    reserved.clear();
+
+    try {
+      assert.equal(testApi.reserveUniqueSubagentName("researcher", "Researcher"), "Researcher");
+      assert.equal(testApi.reserveUniqueSubagentName("researcher", "Researcher"), "Researcher-2");
+      assert.deepEqual([...reserved], ["Researcher", "Researcher-2"]);
+    } finally {
+      runningMap.clear();
+      reserved.clear();
+    }
+  });
+
   it("uniqueRunningName suffixes defaulted names that collide with running subagents", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;

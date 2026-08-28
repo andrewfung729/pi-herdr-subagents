@@ -1028,6 +1028,18 @@ function uniqueRunningName(base: string, registryNames?: Set<string>): string {
   return `${base}-${n}`;
 }
 
+/** Reserve a unique display/registry name for every spawn, explicit or defaulted. */
+function reserveUniqueSubagentName(
+  agent: string,
+  requestedName?: string,
+  registryNames?: Set<string>,
+): string {
+  const base = requestedName?.trim() || agent;
+  const name = uniqueRunningName(base, registryNames);
+  reservedNames.add(name);
+  return name;
+}
+
 function resolveRunningByName(name: string): { running: RunningSubagent } | { error: string } {
   const requestedName = name.trim();
   if (!requestedName) {
@@ -1197,6 +1209,7 @@ export const __test__ = {
   getToolExtensionPath,
   resolveRunningByName,
   uniqueRunningName,
+  reserveUniqueSubagentName,
   reservedNames,
   launchingSubagentSurfaces,
   selectSubagentSurfaceAnchor,
@@ -1761,18 +1774,12 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
         ctx.sessionManager.getSessionId(),
       );
 
-      // Default the cosmetic pane label to the agent name when omitted,
-      // disambiguating against running subagents, in-flight reservations, and
-      // every name already in the registry — so names stay unique across the
-      // whole session, running or finished. Reserve the chosen name
-      // synchronously (before any await) so parallel spawns don't collide.
-      let reservedName: string | null = null;
-      if (!params.name?.trim()) {
-        const registryNames = new Set(Object.keys(readNameRegistry(parentArtifactDir)));
-        params.name = uniqueRunningName(params.agent, registryNames);
-        reservedName = params.name;
-        reservedNames.add(reservedName);
-      }
+      // Disambiguate both explicit and defaulted cosmetic names against
+      // running subagents, in-flight reservations, and every name already in
+      // the registry. Reserve synchronously so parallel spawns cannot collide.
+      const registryNames = new Set(Object.keys(readNameRegistry(parentArtifactDir)));
+      params.name = reserveUniqueSubagentName(params.agent, params.name, registryNames);
+      const reservedName = params.name;
 
       // Launch the subagent (creates pane, sends command). Release the name
       // reservation once it registers in runningSubagents (or launch fails) —
