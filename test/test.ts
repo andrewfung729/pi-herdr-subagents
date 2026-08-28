@@ -2707,11 +2707,164 @@ describe("subagent interruption", () => {
     );
 
     assert.match(presentation, /Sub-agent "Worker" failed/);
-    assert.match(presentation, /provider\/agent error — auto-retry exhausted/);
+    assert.match(presentation, /provider\/agent error/);
     assert.match(presentation, /Error: Anthropic 529 Overloaded after 3 retries/);
     assert.match(presentation, /subagent_message\(\{ name: "Worker"/);
     assert.doesNotMatch(presentation, /Session id:/);
     assert.doesNotMatch(presentation, /ignored when errorMessage is present/);
+  });
+
+  it("strips ANSI codes from screen snapshots", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const strip = testApi.stripAnsiCodes as (text: string) => string;
+
+    const raw =
+      "\x1b[38;2;224;108;117mError: No API key found for openrouter.\x1b[0m\n" +
+      "\x1b[2mUse /login to log into a provider.\x1b[0m";
+    assert.equal(
+      strip(raw),
+      "Error: No API key found for openrouter.\nUse /login to log into a provider.",
+    );
+  });
+
+  it("extracts the pi error banner from a stalled pane's screen", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const extract = testApi.extractScreenErrorText as (screen: string) => string | null;
+
+    // What the pane looks like after a pre-flight auth failure (screenshot case).
+    const screen = [
+      "[Extensions]",
+      "pi-web-access, subagent-done.ts",
+      "",
+      "\x1b[31mError: \x1b[0m\x1b[31mNo API key found for openrouter.\x1b[0m",
+      "",
+      "Use /login to log into a provider via OAuth or API key.",
+      "[researcher] — 3 tools  (Ctrl+Alt+O to expand)",
+      "~/dev/pi-herdr-exp (master)",
+    ].join("\n");
+    assert.equal(extract(screen), "No API key found for openrouter.");
+
+    // Shell-level launch failure.
+    assert.equal(
+      extract("bash: line 3: pi: command not found"),
+      "bash: line 3: pi: command not found",
+    );
+
+    // Most recent banner wins.
+    assert.equal(extract("Error: first failure\nError: second failure"), "second failure");
+
+    // No recognizable error → null.
+    assert.equal(extract("npm test\nall tests passed"), null);
+  });
+
+  it("builds a bounded single-line excerpt of the screen tail", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const excerpt = testApi.screenTailExcerpt as (screen: string, maxChars?: number) => string;
+
+    const text = excerpt("\x1b[31mline one\x1b[0m\nline two\nline three", 200);
+    assert.equal(text, "line one | line two | line three");
+
+    const bounded = excerpt("a\nbb\nccc", 6);
+    assert.ok(bounded.length <= 7);
+    assert.match(bounded, /ccc$/);
+  });
+
+  it("flags autonomous startup stalls as fatal but spares active and interactive subagents", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const isCandidate = testApi.isFatalStallCandidate as (running: any) => boolean;
+
+    // Agent loop never started: activity phase stuck at "starting".
+    assert.equal(isCandidate(makeRunning({ activity: { phase: "starting" } })), true);
+    // No valid activity snapshot at all (child crashed before pi booted).
+    assert.equal(isCandidate(makeRunning({})), true);
+    // Agent loop ran: phase left "starting".
+    assert.equal(isCandidate(makeRunning({ activity: { phase: "waiting" } })), false);
+    assert.equal(isCandidate(makeRunning({ activity: { phase: "active" } })), false);
+    // Interactive subagents are user-driven — never escalated.
+    assert.equal(
+      isCandidate(makeRunning({ interactive: true, activity: { phase: "starting" } })),
+      false,
+    );
+    // Already escalated — never twice.
+    assert.equal(
+      isCandidate(makeRunning({ fatalStallEscalated: true, activity: { phase: "starting" } })),
+      false,
+    );
+  });
+
+  it("escalates a fatal stall by synthesizing the child's .exit sidecar", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const dir = mkdtempSync(join(tmpdir(), "subagent-stall-"));
+    const sessionFile = join(dir, "stalled.jsonl");
+
+    try {
+      const running = makeRunning({
+        id: "s1",
+        name: "Researcher",
+        surface: "definitely-not-a-real-pane",
+        startTime: Date.now() - 120_000,
+        sessionFile,
+        activity: { phase: "starting" },
+      });
+
+      testApi.escalateFatalStall(running);
+
+      const exitFile = `${sessionFile}.exit`;
+      assert.equal(existsSync(exitFile), true, "expected .exit sidecar to be written");
+      const data = JSON.parse(readFileSync(exitFile, "utf-8"));
+      assert.equal(data.type, "error");
+      assert.equal(data.stopReason, "error");
+      assert.match(data.errorMessage, /never started its agent loop/);
+      assert.match(data.errorMessage, /Researcher|stalled|pane/i);
+
+      // The sidecar decodes through the same path as real child errors.
+      const interpreted = __pollForExitTest__.interpretExitSidecar(data);
+      assert.equal(interpreted.reason, "error");
+      assert.equal(interpreted.exitCode, 1);
+      assert.match(interpreted.errorMessage ?? "", /never started its agent loop/);
+
+      // Guard: a second escalation attempt must not rewrite or throw.
+      testApi.escalateFatalStall(running);
+      assert.equal(existsSync(exitFile), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("watcher tick only escalates after the fatal-stall threshold and a stalled classification", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const maybeEscalate = testApi.maybeEscalateFatalStall as (running: any) => void;
+    const threshold = testApi.FATAL_STALL_AFTER_SECONDS as number;
+    const dir = mkdtempSync(join(tmpdir(), "subagent-stall-"));
+    const sessionFile = join(dir, "tick.jsonl");
+
+    try {
+      // Too early: young stall must not escalate.
+      const young = makeRunning({
+        startTime: Date.now() - (threshold - 10) * 1000,
+        sessionFile,
+        activity: { phase: "starting" },
+        statusState: createStatusState({ source: "pi", startTimeMs: Date.now() }),
+      });
+      maybeEscalate(young);
+      assert.equal(existsSync(`${sessionFile}.exit`), false);
+
+      // Old enough + stalled classification → escalates.
+      const old = makeRunning({
+        startTime: Date.now() - (threshold + 10) * 1000,
+        sessionFile,
+        activity: { phase: "starting" },
+        statusState: createStatusState({
+          source: "pi",
+          startTimeMs: Date.now() - (threshold + 10) * 1000,
+        }),
+      });
+      old.statusState.firstObservationAtMs = Date.now() - (threshold + 10) * 1000;
+      maybeEscalate(old);
+      assert.equal(existsSync(`${sessionFile}.exit`), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

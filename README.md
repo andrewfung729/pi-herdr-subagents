@@ -183,6 +183,12 @@ Status display is configured via `config.json` in the extension directory (copy 
 }
 ```
 
+### Fatal startup stalls
+
+A sub-agent whose `pi` process fails before its agent loop starts (missing provider API key, unknown model, a launch script that dies instantly) never fires `agent_start`/`agent_end`, so it would otherwise sit at its interactive prompt forever and the parent would wait forever on a silent "stalled" status. The watcher escalates this case: when an autonomous sub-agent has been stalled at startup for 60 seconds (`FATAL_STALL_AFTER_SECONDS`) with no agent activity ever recorded, it reads the pane screen, extracts the error text (e.g. `Error: No API key found for openrouter.`), synthesizes the child's `.exit` error sidecar, closes the pane, and delivers a normal failure result (`Sub-agent "x" failed (provider/agent error)` with the underlying message) to the parent. Interactive sub-agents are exempt — the user drives those panes directly.
+
+If your shell startup is legitimately slower than the threshold (e.g. heavy `direnv` hooks in the child cwd), raise `PI_SUBAGENT_SHELL_READY_DELAY_MS` so the launch command is sent later, or spawn the sub-agent with a working environment. A pane that disappears mid-run (closed from the herdr UI, or a herdr restart) is reported to the parent as `Subagent pane closed before completion` instead of hanging the wait.
+
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`)

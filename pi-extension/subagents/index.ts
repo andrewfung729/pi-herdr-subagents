@@ -27,6 +27,7 @@ import {
   isMuxAvailable,
   muxSetupHint,
   pollForExit,
+  readScreen,
   sendCommand,
   sendLongCommand,
   shellEscape,
@@ -62,6 +63,13 @@ import {
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Seconds a watcher tolerates an autonomous subagent stalled at startup
+ * (activity phase never left "starting") before escalating it as fatal. See
+ * the "Fatal startup stalls" section near watchSubagent().
+ */
+export const FATAL_STALL_AFTER_SECONDS = 60;
 
 // Survive /reload: clear timers and abort poll loops from the previous module load.
 // /reload re-imports this file, giving fresh module-level state, but closures from
@@ -574,7 +582,7 @@ function resolveResultPresentation(
     // change approach instead of silently treating the run as completed.
     return (
       `Sub-agent "${name}" failed after ${formatElapsed(result.elapsed)} ` +
-      `(provider/agent error — auto-retry exhausted).\n\n` +
+      `(provider/agent error).\n\n` +
       `Error: ${result.errorMessage}\n\n` +
       `The subagent did not produce a result. You can retry by spawning a new ` +
       `subagent or resume the session with subagent_message.${sessionRef}`
@@ -626,6 +634,11 @@ interface RunningSubagent {
   };
   abortController?: AbortController;
   statusState: SubagentStatusState;
+  /**
+   * Set once a fatal startup stall has been escalated (the .exit sidecar was
+   * synthesized and the pane closed), so watcher ticks never re-run it.
+   */
+  fatalStallEscalated?: boolean;
   /**
    * When true, status transitions (stalled/recovered) do not wake the parent
    * session via a steer message. The widget still updates locally. Used for
@@ -1160,7 +1173,9 @@ function startStatusRefresh(pi: ExtensionAPI) {
       // wake the parent session on stalled/recovered transitions — the user is
       // working in the subagent's pane, and a steer message here would burn an
       // orchestrator turn on a no-op "still waiting" ping. Widget still updates.
-      if (transition && !running.interactive) {
+      // Fatal-stall escalations already wake the parent with a full failure
+      // result via the watcher — don't stack a bare "stalled" ping on top.
+      if (transition && !running.interactive && !running.fatalStallEscalated) {
         transitionLines.push(formatTransitionLine(running.name, snapshot, transition));
       }
     }
@@ -1218,6 +1233,14 @@ export const __test__ = {
   handleSubagentSteer,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  stripAnsiCodes,
+  extractScreenErrorText,
+  screenTailExcerpt,
+  isFatalStallCandidate,
+  writeFatalStallSidecar,
+  escalateFatalStall,
+  maybeEscalateFatalStall,
+  FATAL_STALL_AFTER_SECONDS,
   runningSubagents,
   formatElapsed,
   formatTokens,
@@ -1527,6 +1550,135 @@ function deliverPendingQuestion(running: RunningSubagent): void {
   );
 }
 
+// ── Fatal startup stalls ──
+//
+// A child pi that fails BEFORE its agent loop starts (missing provider API
+// key, unknown model, crashed launch script) never fires agent_start/
+// agent_end in subagent-done.ts, so no .exit sidecar is written and the
+// process sits at its interactive prompt forever. The watcher would wait
+// forever; the only signal is the status machine flipping to "stalled" with
+// the activity phase still stuck at "starting". When that persists for an
+// autonomous subagent, synthesize the same .exit sidecar the child would have
+// written and close the pane, so the normal watcher path wakes the parent
+// with a clear failure instead of a silent hang.
+
+/** Remove ANSI escape sequences (CSI/SGR and OSC) from terminal output. */
+function stripAnsiCodes(text: string): string {
+  return text
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+}
+
+/** Collapse a raw screen line to a single trimmed, space-collapsed string. */
+function cleanScreenLine(line: string): string {
+  return line.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Extract a user-visible fatal error message from a pane screen snapshot.
+ * pi renders fatal prompt errors as `Error: <message>` in the scrollback
+ * (interactive-mode's showError); crashed launch scripts surface as shell
+ * `...: command not found` lines. The most recent match wins. Returns null
+ * when the snapshot shows no recognizable error.
+ */
+function extractScreenErrorText(screen: string): string | null {
+  const lines = stripAnsiCodes(screen)
+    .split("\n")
+    .map(cleanScreenLine)
+    .filter((line) => line.length > 0);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const banner = lines[i].match(/^(?:Error|FATAL)\s*[:：]\s*(.+)$/i);
+    if (banner) return banner[1].trim();
+    if (/command not found$/i.test(lines[i])) return lines[i];
+  }
+  return null;
+}
+
+/** Compact single-line excerpt of the last screen rows, for error reporting. */
+function screenTailExcerpt(screen: string, maxChars = 240): string {
+  const lines = stripAnsiCodes(screen).split("\n").map(cleanScreenLine).filter(Boolean);
+  const excerpt: string[] = [];
+  let used = 0;
+  for (let i = lines.length - 1; i >= 0 && used < maxChars; i--) {
+    excerpt.unshift(lines[i]);
+    used += lines[i].length + 1;
+  }
+  const text = excerpt.join(" | ");
+  return text.length > maxChars ? `…${text.slice(-maxChars)}` : text;
+}
+
+/**
+ * True when a stalled watcher target is dead weight: an autonomous subagent
+ * whose activity phase never left "starting" (or which never produced a valid
+ * activity snapshot at all). Its agent loop never started, so it will never
+ * finish on its own. Interactive subagents are user-driven and exempt.
+ */
+function isFatalStallCandidate(running: RunningSubagent): boolean {
+  if (running.interactive || running.fatalStallEscalated) return false;
+  const activity = running.activity;
+  return !activity || activity.phase === "starting";
+}
+
+/** Write the .exit sidecar the child's error path would have written. */
+function writeFatalStallSidecar(sessionFile: string, errorMessage: string): void {
+  writeFileSync(
+    `${sessionFile}.exit`,
+    JSON.stringify({ type: "error", errorMessage, stopReason: "error" }),
+  );
+}
+
+/**
+ * Escalate a fatal startup stall: snapshot the pane's error output,
+ * synthesize the child's .exit sidecar, and close the pane. The watcher's
+ * fast path picks up the sidecar within one poll interval and delivers the
+ * failure to the parent through the normal subagent_result path.
+ */
+function escalateFatalStall(running: RunningSubagent): void {
+  if (running.fatalStallEscalated) return;
+  running.fatalStallEscalated = true;
+
+  let screen: string | null = null;
+  try {
+    screen = readScreen(running.surface, 40);
+  } catch {
+    // Pane may already be gone; report from what we know.
+  }
+
+  const elapsed = formatElapsed(Math.floor((Date.now() - running.startTime) / 1000));
+  const errorLine = screen ? extractScreenErrorText(screen) : null;
+  const detail = errorLine
+    ? `Pane error: ${errorLine}`
+    : screen
+      ? `Last pane output: ${screenTailExcerpt(screen)}`
+      : "No pane output could be read.";
+  const errorMessage = `Subagent never started its agent loop (stalled ${elapsed} at startup). ${detail}`;
+
+  try {
+    writeFatalStallSidecar(running.sessionFile, errorMessage);
+  } catch {
+    // If even the sidecar write fails, leave the pane open for inspection.
+    return;
+  }
+  try {
+    closeSurface(running.surface);
+  } catch {
+    // Pane already gone — the sidecar alone completes the escalation.
+  }
+}
+
+/**
+ * Watcher-tick hook: escalate autonomous subagents stalled at startup for
+ * FATAL_STALL_AFTER_SECONDS — their child process will never exit on its own,
+ * so waiting longer only strands the parent.
+ */
+function maybeEscalateFatalStall(running: RunningSubagent): void {
+  if (!isFatalStallCandidate(running)) return;
+  const elapsedSeconds = Math.floor((Date.now() - running.startTime) / 1000);
+  if (elapsedSeconds < FATAL_STALL_AFTER_SECONDS) return;
+  if (classifyStatus(running.statusState, Date.now()).kind !== "stalled") return;
+  escalateFatalStall(running);
+}
+
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
@@ -1540,6 +1692,7 @@ async function watchSubagent(
       onTick() {
         observeRunningSubagent(running);
         deliverPendingQuestion(running);
+        maybeEscalateFatalStall(running);
       },
     });
 
@@ -2404,7 +2557,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
           .replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
           .replace(
             new RegExp(
-              `^Sub-agent "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" failed after ${elapsed} \\(provider/agent error — auto-retry exhausted\\)\\.\\n\\n`,
+              `^Sub-agent "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" failed after ${elapsed} \\(provider/agent error\\)\\.\\n\\n`,
             ),
             "",
           );

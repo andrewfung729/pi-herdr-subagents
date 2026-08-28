@@ -466,7 +466,7 @@ export async function pollForExit(
       if (match) {
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
       }
-    } catch {
+    } catch (error) {
       // Surface may have been destroyed — check if .exit file appeared in the meantime
       if (options.sessionFile) {
         try {
@@ -477,6 +477,16 @@ export async function pollForExit(
             return interpretExitSidecar(data);
           }
         } catch {}
+      }
+      if (isPaneGoneError(error)) {
+        // The pane was destroyed without a sentinel (closed by the user from
+        // the herdr UI, a herdr restart, or a fatal-stall escalation). Return
+        // instead of looping forever — the parent must be woken either way.
+        return {
+          reason: "error",
+          exitCode: 1,
+          errorMessage: "Subagent pane closed before completion (pane_not_found).",
+        };
       }
     }
 
