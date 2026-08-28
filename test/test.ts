@@ -1302,6 +1302,25 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("getToolExtensionPath resolves pi-web-access tools from the npm package layout", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir }) => {
+      const pkg = join(globalDir, "npm", "node_modules", "pi-web-access");
+      mkdirSync(pkg, { recursive: true });
+      writeFileSync(join(pkg, "index.ts"), "stub\n");
+
+      // One package entry registers every web tool; all names resolve to it.
+      for (const tool of ["web_search", "fetch_content", "source_check", "get_search_content"]) {
+        assert.ok(
+          testApi.getToolExtensionPath(tool)?.endsWith(join("pi-web-access", "index.ts")),
+          `expected ${tool} to resolve to the pi-web-access entry`,
+        );
+      }
+      // Legacy upstream names no longer resolve on their own.
+      assert.equal(testApi.getToolExtensionPath("web_fetch"), undefined);
+      assert.equal(testApi.getToolExtensionPath("youtube_search"), undefined);
+    });
+  });
+
   it("ignores invalid session-mode values", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(

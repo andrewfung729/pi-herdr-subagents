@@ -201,25 +201,39 @@ export function registerToolExtension(name: string, extensionPath: string): void
  * `--no-extensions` disables global discovery. Returns undefined for built-in
  * tools and for unknown names (which simply won't be granted).
  */
+/**
+ * Tools registered by the pi-web-access package (`pi install
+ * npm:pi-web-access`), the de-facto standard web toolset for pi. A single
+ * entry file registers all of them, so every name resolves to the same path.
+ * `web_search` also resolves to a legacy hand-installed
+ * `extensions/web-search/` directory first, for setups predating the package.
+ */
+const PI_WEB_ACCESS_TOOLS: ReadonlySet<string> = new Set([
+  "web_search",
+  "fetch_content",
+  "source_check",
+  "get_search_content",
+]);
+
 function getToolExtensionPath(tool: string): string | undefined {
   if (BUILTIN_TOOLS.has(tool)) return undefined;
   // The four spawning tools are registered by THIS extension.
   if ((SPAWNING_TOOLS as readonly string[]).includes(tool)) {
     return fileURLToPath(import.meta.url);
   }
-  const extBase = join(getAgentConfigDir(), "extensions");
-  const map: Record<string, string> = {
-    web_search: join(extBase, "web-search", "index.ts"),
-    web_fetch: join(extBase, "web-fetch", "index.ts"),
-    video_extract: join(extBase, "video-extract", "index.ts"),
-    youtube_search: join(extBase, "youtube-search", "index.ts"),
-    google_image_search: join(extBase, "google-image-search", "index.ts"),
-  };
-  // Prefer the built-in path, but fall back to a runtime-registered extension
-  // when that path no longer exists on disk (e.g. a built-in tool extension
-  // was disabled/removed but a project-local extension re-registered it).
-  const builtin = map[tool];
-  if (builtin && existsSync(builtin)) return builtin;
+  const agentDir = getAgentConfigDir();
+  // Legacy per-tool directory install (hand-copied extension).
+  if (tool === "web_search") {
+    const legacy = join(agentDir, "extensions", "web-search", "index.ts");
+    if (existsSync(legacy)) return legacy;
+  }
+  // pi-web-access npm package — one entry file registers every web tool.
+  if (PI_WEB_ACCESS_TOOLS.has(tool)) {
+    const npmEntry = join(agentDir, "npm", "node_modules", "pi-web-access", "index.ts");
+    if (existsSync(npmEntry)) return npmEntry;
+  }
+  // Fall back to a runtime-registered extension (e.g. a project-local
+  // extension exposing a bespoke tool).
   return EXTRA_TOOL_EXTENSIONS.get(tool);
 }
 
