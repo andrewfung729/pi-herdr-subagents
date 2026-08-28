@@ -23,6 +23,7 @@ import {
   closeSurface,
   createSurface,
   createSurfaceSplit,
+  getHerdrRuntimeStatus,
   isMuxAvailable,
   muxSetupHint,
   pollForExit,
@@ -1584,16 +1585,27 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // registration time prevents the model from seeing and attempting unusable
   // subagent tools in a regular terminal. Execution-time checks remain below
   // as a defensive guard in case herdr becomes unavailable after startup.
-  if (!isMuxAvailable()) return;
+  const herdrStatus = getHerdrRuntimeStatus();
+  if (herdrStatus.kind === "outside-herdr" || herdrStatus.kind === "missing") return;
 
-  registerSubagentsExtension(pi);
+  if (!herdrStatus.compatible) {
+    pi.on("session_start", (_event, ctx) => {
+      ctx.ui.notify(herdrStatus.message, "error");
+    });
+    return;
+  }
+
+  registerSubagentsExtension(pi, herdrStatus.kind === "untested" ? herdrStatus.message : undefined);
 }
 
-function registerSubagentsExtension(pi: ExtensionAPI) {
+function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?: string) {
   latestPi = pi;
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    if (herdrCompatibilityWarning) {
+      ctx.ui.notify(herdrCompatibilityWarning, "warning");
+    }
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.

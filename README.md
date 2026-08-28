@@ -186,7 +186,7 @@ Status display is configured via `config.json` in the extension directory (copy 
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`)
-- [herdr](https://herdr.dev) — one Rust binary; `brew install herdr`
+- [herdr](https://herdr.dev) >=0.8.2 — tested with 0.8.2; versions >=0.9.0 produce an untested-compatibility warning
 
 ```bash
 herdr          # start or attach to the persistent session
@@ -200,10 +200,11 @@ The first subagent pane is created with `herdr pane split --current --direction 
 
 ```bash
 pnpm install
-pnpm check                 # biome (lint + format) + tsgo typecheck
-pnpm test                  # unit tests (no multiplexer needed)
-pnpm run test:surface      # herdr surface tests (run inside herdr)
-pnpm run test:integration  # full lifecycle tests (real LLM calls, run inside herdr)
+pnpm check                    # biome (lint + format) + tsgo typecheck
+pnpm test                     # unit tests (no multiplexer needed)
+pnpm run check:herdr-skill    # compare the bundled skill with pinned Herdr 0.8.2
+pnpm run test:surface         # herdr surface tests (run inside herdr)
+pnpm run test:integration     # full lifecycle tests (real LLM calls, run inside herdr)
 ```
 
 Checks follow the pi monorepo's setup: [Biome](https://biomejs.dev) for lint/format and the native TypeScript compiler (`tsgo`, strict mode) for typechecking, wired into a husky pre-commit hook.

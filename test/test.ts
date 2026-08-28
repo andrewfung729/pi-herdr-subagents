@@ -10,7 +10,11 @@ import {
   getSubagentActivityFile,
   readSubagentActivityFile,
 } from "../pi-extension/subagents/activity.ts";
-import { __pollForExitTest__, shellEscape } from "../pi-extension/subagents/herdr.ts";
+import {
+  __herdrVersionTest__,
+  __pollForExitTest__,
+  shellEscape,
+} from "../pi-extension/subagents/herdr.ts";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
   appendBranchSummary,
@@ -2936,6 +2940,44 @@ describe("subagent display helpers", () => {
 });
 
 describe("herdr.ts", () => {
+  describe("version compatibility", () => {
+    it("accepts the tested release and later 0.8 patches", () => {
+      assert.deepEqual(__herdrVersionTest__.classifyHerdrVersionOutput("herdr 0.8.2"), {
+        kind: "supported",
+        compatible: true,
+        version: "0.8.2",
+      });
+      assert.deepEqual(__herdrVersionTest__.classifyHerdrVersionOutput("herdr 0.8.99"), {
+        kind: "supported",
+        compatible: true,
+        version: "0.8.99",
+      });
+    });
+
+    it("rejects versions older than 0.8.2", () => {
+      const status = __herdrVersionTest__.classifyHerdrVersionOutput("herdr 0.8.1");
+      assert.equal(status.kind, "unsupported");
+      assert.equal(status.compatible, false);
+      assert.match(status.message ?? "", />=0\.8\.2/);
+    });
+
+    it("allows 0.9 and later with an untested warning", () => {
+      for (const output of ["herdr 0.9.0", "herdr 1.0.0-beta.1"]) {
+        const status = __herdrVersionTest__.classifyHerdrVersionOutput(output);
+        assert.equal(status.kind, "untested");
+        assert.equal(status.compatible, true);
+        assert.match(status.message ?? "", /without a compatibility guarantee/);
+      }
+    });
+
+    it("rejects an unparseable version response", () => {
+      const status = __herdrVersionTest__.classifyHerdrVersionOutput("herdr unknown");
+      assert.equal(status.kind, "unsupported");
+      assert.equal(status.compatible, false);
+      assert.match(status.message ?? "", /Could not parse/);
+    });
+  });
+
   describe("shellEscape", () => {
     it("wraps in single quotes", () => {
       assert.equal(shellEscape("hello"), "'hello'");

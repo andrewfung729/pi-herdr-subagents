@@ -19,6 +19,7 @@
     "test:surface": "node --test --test-concurrency=1 test/integration/herdr-surface.test.ts",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.ts",
     "check": "biome check --error-on-warnings . && tsgo --noEmit",
+    "check:herdr-skill": "node scripts/check-herdr-skill.ts",
     "fix": "biome check --write --error-on-warnings .",
     "prepare": "husky"
   },

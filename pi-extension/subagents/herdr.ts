@@ -23,7 +23,33 @@ const execFileAsync = promisify(execFile);
 
 // ── Availability ──
 
+export const HERDR_MIN_VERSION = "0.8.2";
+export const HERDR_TESTED_VERSION = "0.8.2";
+export const HERDR_REVIEW_VERSION = "0.9.0";
+
+interface SemanticVersion {
+  raw: string;
+  major: number;
+  minor: number;
+  patch: number;
+}
+
+export type HerdrRuntimeStatus =
+  | {
+      kind: "outside-herdr" | "missing" | "unsupported";
+      compatible: false;
+      message: string;
+      version?: string;
+    }
+  | {
+      kind: "supported" | "untested";
+      compatible: true;
+      message?: string;
+      version: string;
+    };
+
 const commandAvailability = new Map<string, boolean>();
+let installedHerdrStatus: HerdrRuntimeStatus | undefined;
 
 function hasCommand(command: string): boolean {
   if (commandAvailability.has(command)) {
@@ -42,12 +68,99 @@ function hasCommand(command: string): boolean {
   return available;
 }
 
-/**
- * True when running inside a herdr pane with the herdr binary on PATH.
- * `HERDR_ENV=1` is set by herdr in every process it spawns.
- */
+function parseHerdrVersion(output: string): SemanticVersion | null {
+  const match = output.match(/\b(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?\b/);
+  if (!match) return null;
+  return {
+    raw: `${match[1]}.${match[2]}.${match[3]}`,
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+function compareVersions(left: SemanticVersion, right: SemanticVersion): number {
+  return left.major - right.major || left.minor - right.minor || left.patch - right.patch;
+}
+
+function requiredVersion(version: string): SemanticVersion {
+  const parsed = parseHerdrVersion(version);
+  if (!parsed) throw new Error(`Invalid built-in Herdr version: ${version}`);
+  return parsed;
+}
+
+function classifyHerdrVersionOutput(output: string): HerdrRuntimeStatus {
+  const parsed = parseHerdrVersion(output);
+  if (!parsed) {
+    return {
+      kind: "unsupported",
+      compatible: false,
+      message: `Could not parse \`herdr --version\` output: ${output.trim() || "<empty>"}`,
+    };
+  }
+
+  if (compareVersions(parsed, requiredVersion(HERDR_MIN_VERSION)) < 0) {
+    return {
+      kind: "unsupported",
+      compatible: false,
+      version: parsed.raw,
+      message: `Herdr ${parsed.raw} is too old; subagents require Herdr >=${HERDR_MIN_VERSION}.`,
+    };
+  }
+
+  if (compareVersions(parsed, requiredVersion(HERDR_REVIEW_VERSION)) >= 0) {
+    return {
+      kind: "untested",
+      compatible: true,
+      version: parsed.raw,
+      message:
+        `Herdr ${parsed.raw} is outside the tested compatibility range ` +
+        `(>=${HERDR_MIN_VERSION} <${HERDR_REVIEW_VERSION}); continuing without a compatibility guarantee.`,
+    };
+  }
+
+  return { kind: "supported", compatible: true, version: parsed.raw };
+}
+
+function getInstalledHerdrStatus(): HerdrRuntimeStatus {
+  if (installedHerdrStatus) return installedHerdrStatus;
+
+  try {
+    installedHerdrStatus = classifyHerdrVersionOutput(
+      execFileSync("herdr", ["--version"], { encoding: "utf8" }),
+    );
+  } catch (error: any) {
+    installedHerdrStatus = {
+      kind: "unsupported",
+      compatible: false,
+      message: `Could not run \`herdr --version\`: ${error?.message ?? String(error)}`,
+    };
+  }
+  return installedHerdrStatus;
+}
+
+/** Inspect the Herdr environment and installed CLI version once per process. */
+export function getHerdrRuntimeStatus(): HerdrRuntimeStatus {
+  if (process.env.HERDR_ENV !== "1") {
+    return {
+      kind: "outside-herdr",
+      compatible: false,
+      message: "Subagents require pi to run inside a Herdr-managed pane (HERDR_ENV=1).",
+    };
+  }
+  if (!hasCommand("herdr")) {
+    return {
+      kind: "missing",
+      compatible: false,
+      message: "The herdr CLI is not available on PATH.",
+    };
+  }
+  return getInstalledHerdrStatus();
+}
+
+/** True when the current Herdr runtime is present and not known to be incompatible. */
 export function isHerdrAvailable(): boolean {
-  return process.env.HERDR_ENV === "1" && hasCommand("herdr");
+  return getHerdrRuntimeStatus().compatible;
 }
 
 export function isMuxAvailable(): boolean {
@@ -55,14 +168,17 @@ export function isMuxAvailable(): boolean {
 }
 
 export function muxSetupHint(): string {
-  return "Start pi inside herdr (https://herdr.dev) — `brew install herdr`, then run `herdr` and start pi in a pane.";
+  return `Start pi inside Herdr >=${HERDR_MIN_VERSION} (https://herdr.dev) — \`brew install herdr\`, then run \`herdr\` and start pi in a pane.`;
 }
 
 function requireHerdr(): void {
-  if (!isHerdrAvailable()) {
-    throw new Error(`herdr is required for subagents. ${muxSetupHint()}`);
+  const status = getHerdrRuntimeStatus();
+  if (!status.compatible) {
+    throw new Error(`${status.message} ${muxSetupHint()}`);
   }
 }
+
+export const __herdrVersionTest__ = { classifyHerdrVersionOutput, parseHerdrVersion };
 
 // ── Shell helpers ──
 
