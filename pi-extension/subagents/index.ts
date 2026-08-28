@@ -214,7 +214,6 @@ function getToolExtensionPath(tool: string): string | undefined {
     video_extract: join(extBase, "video-extract", "index.ts"),
     youtube_search: join(extBase, "youtube-search", "index.ts"),
     google_image_search: join(extBase, "google-image-search", "index.ts"),
-    safe_bash: join(SUBAGENTS_DIR, "tools", "safe-bash.ts"),
   };
   // Prefer the built-in path, but fall back to a runtime-registered extension
   // when that path no longer exists on disk (e.g. a built-in tool extension
@@ -2093,8 +2092,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
       const resumeEnvPrefix = `${resumeEnvParts.join(" ")} `;
 
-      // Resume in the subagent's original cwd so its tools (safe_bash, edits)
-      // operate where they did before.
+      // Resume in the subagent's original cwd so its tools and edits operate
+      // where they did before.
       const resumeCdPrefix = loadout.cwd ? `cd ${shellEscape(loadout.cwd)} && ` : "";
 
       const command = `${resumeCdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
