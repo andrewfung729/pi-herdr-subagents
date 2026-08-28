@@ -6,7 +6,7 @@ Async subagents for [pi](https://github.com/earendil-works/pi), running in [herd
 
 ## How it works
 
-`subagent()` returns immediately. The first sub-agent opens as a right split off the parent pi pane; additional concurrent sub-agents split downward from that right-hand stack. The main session therefore stays as the left column while sub-agents share the right column, and pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
+`subagent()` returns immediately. The first sub-agent opens as a right split off the parent pi pane; additional concurrent sub-agents split downward from that right-hand stack. The main session therefore stays as the left column while sub-agents share the right column, and pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent. Results appear as each sub-agent finishes; concurrent autonomous results are collected into context and the final completion steers the main session once.
 
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
@@ -15,7 +15,7 @@ Async subagents for [pi](https://github.com/earendil-works/pi), running in [herd
 ╰────────────────────────────────────────────────────╯
 ```
 
-Spawn several in parallel — they run concurrently and steer results back independently as each finishes.
+Spawn several in parallel — they run concurrently and display results independently as each finishes, then steer the parent once when the autonomous batch is complete.
 
 Each spawned pane is renamed to the sub-agent's name (best-effort via `herdr pane rename`), so the herdr sidebar and tab strip show useful labels.
 

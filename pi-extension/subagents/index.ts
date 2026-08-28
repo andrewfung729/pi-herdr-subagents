@@ -669,6 +669,21 @@ function createSubagentSurface(name: string): string {
   return surface;
 }
 
+/**
+ * Show every completion immediately, but only wake the parent model when the
+ * current autonomous batch has finished. Interactive panes do not block the
+ * batch because they may intentionally stay open indefinitely.
+ */
+function subagentResultDeliveryOptions(): { triggerTurn: boolean; deliverAs: "steer" } {
+  const autonomousStillRunning = Array.from(runningSubagents.values()).some(
+    (running) => !running.interactive,
+  );
+  return {
+    triggerTurn: launchingSubagentSurfaces.size === 0 && !autonomousStillRunning,
+    deliverAs: "steer",
+  };
+}
+
 // When this extension is loaded inside a subagent that itself spawns children
 // (e.g. a worker delegating to scout/researcher), `subagent-done.ts` runs in the
 // same process and needs to know whether this session still has children in
@@ -1185,6 +1200,7 @@ export const __test__ = {
   reservedNames,
   launchingSubagentSurfaces,
   selectSubagentSurfaceAnchor,
+  subagentResultDeliveryOptions,
   steerSubagent,
   handleSubagentSteer,
   resolveResultPresentation,
@@ -1649,17 +1665,17 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
     description:
       "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
       "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-      "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
+      "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result. Concurrent autonomous results appear as they finish, and the last completion steers one new parent turn — you do not need to do anything to receive them. " +
       "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
       "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you when the autonomous completion batch is ready.",
     promptSnippet:
       "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
       "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
-      "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
+      "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result. Concurrent autonomous results appear as they finish, and the last completion steers one new parent turn — you do not need to do anything to receive them. " +
       "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
       "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+      "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you when the autonomous completion batch is ready.",
     parameters: SubagentParams,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1810,7 +1826,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
                 ...(result.stats ? { stats: result.stats } : {}),
               },
             },
-            { triggerTurn: true, deliverAs: "steer" },
+            subagentResultDeliveryOptions(),
           );
         })
         .catch((err) => {
@@ -1822,7 +1838,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
               display: true,
               details: { name: running.name, task: running.task, error: err?.message },
             },
-            { triggerTurn: true, deliverAs: "steer" },
+            subagentResultDeliveryOptions(),
           );
         });
 
@@ -1834,7 +1850,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
             text:
               `Sub-agent "${params.name}" launched and is now running in the background. ` +
               `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
-              `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
+              `The result will be delivered automatically; concurrent autonomous results trigger one steer after the batch finishes. ` +
               `Until then, move on to other work or tell the user you're waiting.`,
           },
         ],
@@ -2258,7 +2274,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
                 ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
               },
             },
-            { triggerTurn: true, deliverAs: "steer" },
+            subagentResultDeliveryOptions(),
           );
         })
         .catch((err) => {
@@ -2270,7 +2286,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
               display: true,
               details: { name, error: err?.message },
             },
-            { triggerTurn: true, deliverAs: "steer" },
+            subagentResultDeliveryOptions(),
           );
         });
 

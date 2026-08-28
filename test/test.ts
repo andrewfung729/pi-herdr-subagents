@@ -2457,6 +2457,45 @@ describe("subagent interruption", () => {
     }
   });
 
+  it("only steers the parent once the autonomous completion batch is done", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const launching = testApi.launchingSubagentSurfaces as Set<string>;
+    runningMap.clear();
+    launching.clear();
+
+    try {
+      runningMap.set("a1", makeRunning({ id: "a1", interactive: false }));
+      assert.deepEqual(testApi.subagentResultDeliveryOptions(), {
+        triggerTurn: false,
+        deliverAs: "steer",
+      });
+
+      // Interactive panes should not indefinitely block autonomous result delivery.
+      runningMap.set("a1", makeRunning({ id: "a1", interactive: true }));
+      assert.deepEqual(testApi.subagentResultDeliveryOptions(), {
+        triggerTurn: true,
+        deliverAs: "steer",
+      });
+
+      runningMap.clear();
+      launching.add("starting-pane");
+      assert.deepEqual(testApi.subagentResultDeliveryOptions(), {
+        triggerTurn: false,
+        deliverAs: "steer",
+      });
+
+      launching.clear();
+      assert.deepEqual(testApi.subagentResultDeliveryOptions(), {
+        triggerTurn: true,
+        deliverAs: "steer",
+      });
+    } finally {
+      runningMap.clear();
+      launching.clear();
+    }
+  });
+
   it("stacks concurrent subagent surfaces below the newest right-hand pane", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
