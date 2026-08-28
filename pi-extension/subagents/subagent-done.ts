@@ -12,10 +12,11 @@
  * (auto-exit is suppressed for that turn via `awaitingAnswer`), and the parent
  * replies with subagent_message — which lands as the subagent's next turn.
  */
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Box, Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+
 import { writeFileSync } from "node:fs";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
+import { Type } from "@sinclair/typebox";
 import { createSubagentActivityRecorder } from "./activity.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
@@ -86,9 +87,7 @@ export interface SubagentErrorInfo {
  * Returns `null` when the latest assistant turn completed normally or was
  * aborted by the user (handled separately by shouldAutoExitOnAgentEnd).
  */
-export function findLatestAssistantError(
-  messages: any[] | undefined,
-): SubagentErrorInfo | null {
+export function findLatestAssistantError(messages: any[] | undefined): SubagentErrorInfo | null {
   if (!messages) return null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -96,7 +95,8 @@ export function findLatestAssistantError(
     if (msg.stopReason !== "error") return null;
     const raw = typeof msg.errorMessage === "string" ? msg.errorMessage.trim() : "";
     return {
-      errorMessage: raw || "Subagent agent loop ended with stopReason=error (no errorMessage field).",
+      errorMessage:
+        raw || "Subagent agent loop ended with stopReason=error (no errorMessage field).",
       stopReason: "error",
     };
   }
@@ -125,7 +125,7 @@ export default function (pi: ExtensionAPI) {
     activityFile: process.env.PI_SUBAGENT_ACTIVITY_FILE,
   });
 
-  function renderWidget(ctx: { ui: { setWidget: Function } }, _theme: any) {
+  function renderWidget(ctx: { ui: { setWidget: (...args: any[]) => void } }, _theme: any) {
     ctx.ui.setWidget(
       "subagent-tools",
       (_tui: any, theme: any) => {
@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
             const deniedList = denied
               .map((name: string) => theme.fg("error", name))
               .join(theme.fg("muted", ", "));
-            deniedLine = "\n" + theme.fg("muted", "denied: ") + deniedList;
+            deniedLine = `\n${theme.fg("muted", "denied: ")}${deniedList}`;
           }
 
           const content = new Text(
@@ -395,5 +395,4 @@ export default function (pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
   });
-
 }

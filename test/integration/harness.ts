@@ -10,39 +10,39 @@
  */
 import { execFileSync } from "node:child_process";
 import {
-  mkdtempSync,
-  mkdirSync,
   cpSync,
-  readdirSync,
-  rmSync,
   existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
   readFileSync,
+  rmSync,
   unlinkSync,
 } from "node:fs";
-import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  isMuxAvailable,
+  closeSurface,
   createSurface,
   createSurfaceSplit,
-  sendCommand,
-  sendLongCommand,
+  isMuxAvailable,
   readScreen,
   readScreenAsync,
-  closeSurface,
+  sendCommand,
+  sendLongCommand,
   shellEscape,
 } from "../../pi-extension/subagents/herdr.ts";
 
 // Re-export herdr primitives for tests
 export {
+  closeSurface,
   createSurface,
   createSurfaceSplit,
-  sendCommand,
-  sendLongCommand,
   readScreen,
   readScreenAsync,
-  closeSurface,
+  sendCommand,
+  sendLongCommand,
   shellEscape,
 };
 
@@ -87,7 +87,8 @@ export function getAvailableBackends(): string[] {
 export function getCurrentPaneId(): string {
   const stdout = execFileSync("herdr", ["pane", "current"], { encoding: "utf8" });
   const paneId = JSON.parse(stdout)?.result?.pane?.pane_id;
-  if (typeof paneId !== "string") throw new Error(`Unexpected herdr pane current output: ${stdout}`);
+  if (typeof paneId !== "string")
+    throw new Error(`Unexpected herdr pane current output: ${stdout}`);
   return paneId;
 }
 

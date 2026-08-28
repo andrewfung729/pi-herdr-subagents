@@ -13,10 +13,10 @@
  * Ported from the tmux surface of amosblomqvist/pi-interactive-subagents.
  */
 import { execFile, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
@@ -66,7 +66,7 @@ function requireHerdr(): void {
 // ── Shell helpers ──
 
 export function shellEscape(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 // ── CLI plumbing ──
@@ -132,11 +132,14 @@ export function createSurfaceSplit(
   requireHerdr();
 
   const args = [
-    "pane", "split",
+    "pane",
+    "split",
     fromSurface ? "--pane" : "--current",
     ...(fromSurface ? [fromSurface] : []),
-    "--direction", direction === "right" ? "right" : "down",
-    "--cwd", process.cwd(),
+    "--direction",
+    direction === "right" ? "right" : "down",
+    "--cwd",
+    process.cwd(),
     "--no-focus",
   ];
   const stdout = herdr(args);
@@ -198,7 +201,7 @@ export function sendLongCommand(
   }
   scriptParts.push(command);
 
-  writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
+  writeFileSync(scriptPath, `${scriptParts.join("\n")}\n`, {
     mode: 0o755,
   });
   sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
@@ -223,8 +226,13 @@ const HERDR_READ_FLOOR_LINES = 200;
 export function readScreen(surface: string, lines = 50): string {
   requireHerdr();
   const text = herdr([
-    "pane", "read", surface, "--source", "recent-unwrapped",
-    "--lines", String(Math.max(lines, HERDR_READ_FLOOR_LINES)),
+    "pane",
+    "read",
+    surface,
+    "--source",
+    "recent-unwrapped",
+    "--lines",
+    String(Math.max(lines, HERDR_READ_FLOOR_LINES)),
   ]);
   return tailLines(text, lines);
 }
@@ -235,8 +243,13 @@ export function readScreen(surface: string, lines = 50): string {
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
   requireHerdr();
   const text = await herdrAsync([
-    "pane", "read", surface, "--source", "recent-unwrapped",
-    "--lines", String(Math.max(lines, HERDR_READ_FLOOR_LINES)),
+    "pane",
+    "read",
+    surface,
+    "--source",
+    "recent-unwrapped",
+    "--lines",
+    String(Math.max(lines, HERDR_READ_FLOOR_LINES)),
   ]);
   return tailLines(text, lines);
 }

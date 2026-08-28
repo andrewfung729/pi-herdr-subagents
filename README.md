@@ -1,6 +1,6 @@
 # pi-herdr-subagents
 
-Async subagents for [pi](https://github.com/badlogic/pi-mono), running in [herdr](https://herdr.dev) panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/earendil-works/pi), running in [herdr](https://herdr.dev) panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
 **herdr-only fork.** Ported from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblomqvist/pi-interactive-subagents) (the tmux-only fork), which itself forked [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents). All terminal surface operations go through the `herdr` CLI instead of `tmux`.
 
@@ -184,7 +184,7 @@ Status display is configured via `config.json` in the extension directory (copy 
 
 ## Requirements
 
-- [pi](https://github.com/badlogic/pi-mono)
+- [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`)
 - [herdr](https://herdr.dev) — one Rust binary; `brew install herdr`
 
 ```bash
@@ -198,11 +198,14 @@ Subagent panes are created with `herdr pane split --current --direction right --
 ## Development
 
 ```bash
-npm install
-npm test                    # unit tests (no multiplexer needed)
-npm run test:surface        # herdr surface tests (run inside herdr)
-npm run test:integration    # full lifecycle tests (real LLM calls, run inside herdr)
+pnpm install
+pnpm check                 # biome (lint + format) + tsgo typecheck
+pnpm test                  # unit tests (no multiplexer needed)
+pnpm run test:surface      # herdr surface tests (run inside herdr)
+pnpm run test:integration  # full lifecycle tests (real LLM calls, run inside herdr)
 ```
+
+Checks follow the pi monorepo's setup: [Biome](https://biomejs.dev) for lint/format and the native TypeScript compiler (`tsgo`, strict mode) for typechecking, wired into a husky pre-commit hook.
 
 ## Acknowledgements
 

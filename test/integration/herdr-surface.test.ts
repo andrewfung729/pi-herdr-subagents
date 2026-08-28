@@ -8,28 +8,28 @@
  * Run inside herdr:
  *   herdr 'npm run test:integration'
  */
-import { describe, it, before, after } from "node:test";
+
 import assert from "node:assert/strict";
 import { unlinkSync } from "node:fs";
+import { after, before, describe, it } from "node:test";
 import {
-  getAvailableBackends,
-  createTestEnv,
   cleanupTestEnv,
+  closeSurface,
+  createTestEnv,
   createTrackedSurface,
+  getAvailableBackends,
   getCurrentPaneId,
   getFocusedSurface,
-  untrackSurface,
-  sendCommand,
-  sendLongCommand,
   readScreen,
   readScreenAsync,
-  closeSurface,
+  sendCommand,
+  sendLongCommand,
   sleep,
+  type TestEnv,
   uniqueId,
-  trackTempFile,
+  untrackSurface,
   waitForFile,
   waitForScreen,
-  type TestEnv,
 } from "./harness.ts";
 
 const backends = getAvailableBackends();
@@ -107,15 +107,9 @@ for (const backend of backends) {
       await sleep(1500);
 
       const screen = readScreen(surface, 50);
-      assert.ok(
-        screen.includes(`SPEC_${marker}`),
-        `Expected special-char output. Got:\n${screen}`,
-      );
+      assert.ok(screen.includes(`SPEC_${marker}`), `Expected special-char output. Got:\n${screen}`);
       // $ should be literal inside single quotes
-      assert.ok(
-        screen.includes("$HOME"),
-        `Expected literal $HOME in output. Got:\n${screen}`,
-      );
+      assert.ok(screen.includes("$HOME"), `Expected literal $HOME in output. Got:\n${screen}`);
     });
 
     it("sends a long command via script file without truncation", async () => {
