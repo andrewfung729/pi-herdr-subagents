@@ -34,6 +34,8 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 
 ## Tools
 
+The extension registers its tools and `/subagent` command only when Pi starts inside a herdr pane and the `herdr` CLI is available. In a regular terminal, the package may still be loaded by Pi, but it contributes no tools or commands.
+
 | Tool | Description |
 | --- | --- |
 | `subagent` | Spawn a sub-agent in a dedicated herdr pane (async) |

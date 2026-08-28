@@ -113,6 +113,10 @@ function createMockExtensionApi() {
   };
 }
 
+function registerSubagentsForTest(api: any) {
+  (subagentsModule as any).__test__.registerExtension(api);
+}
+
 function restoreEnvVar(name: string, value: string | undefined) {
   if (value === undefined) {
     delete process.env[name];
@@ -1499,7 +1503,7 @@ describe("subagent discovery", () => {
       );
 
       const { api, registeredTools } = createMockExtensionApi();
-      (subagentsModule as any).default(api);
+      registerSubagentsForTest(api);
 
       const tool = registeredTools.find((tool) => tool.name === "subagents_list");
       assert.ok(tool, "expected subagents_list to be registered");
@@ -1527,7 +1531,7 @@ describe("subagent discovery", () => {
       );
 
       const { api, registeredTools } = createMockExtensionApi();
-      (subagentsModule as any).default(api);
+      registerSubagentsForTest(api);
 
       const tool = registeredTools.find((tool) => tool.name === "subagents_list");
       assert.ok(tool, "expected subagents_list to be registered");
@@ -1574,7 +1578,7 @@ describe("subagent discovery", () => {
       );
 
       const { api, registeredTools } = createMockExtensionApi();
-      (subagentsModule as any).default(api);
+      registerSubagentsForTest(api);
 
       const tool = registeredTools.find((tool) => tool.name === "subagents_list");
       assert.ok(tool, "expected subagents_list to be registered");
@@ -1988,7 +1992,7 @@ describe("commands", () => {
   it("/subagent emits a spawn tool call for a known agent", () => {
     const { api, registeredCommands, sentUserMessages } = createMockExtensionApi();
 
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
 
     const subagent = registeredCommands.find((command) => command.name === "subagent");
     assert.ok(subagent, "expected /subagent to be registered");
@@ -2004,7 +2008,7 @@ describe("commands", () => {
 
   it("does not register the removed /iterate or /plan commands", () => {
     const { api, registeredCommands } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
     assert.equal(
       registeredCommands.find((c) => c.name === "iterate"),
       undefined,
@@ -2017,6 +2021,23 @@ describe("commands", () => {
 });
 
 describe("tool registration", () => {
+  it("does not register tools or commands outside herdr", () => {
+    const originalHerdrEnv = process.env.HERDR_ENV;
+    delete process.env.HERDR_ENV;
+
+    try {
+      const { api, registeredTools, registeredCommands, registeredMessageRenderers } =
+        createMockExtensionApi();
+      (subagentsModule as any).default(api);
+
+      assert.deepEqual(registeredTools, []);
+      assert.deepEqual(registeredCommands, []);
+      assert.deepEqual(registeredMessageRenderers, []);
+    } finally {
+      restoreEnvVar("HERDR_ENV", originalHerdrEnv);
+    }
+  });
+
   it("always resumes subagents as autonomous (auto-exit, non-interactive tracking)", () => {
     const testApi = (subagentsModule as any).__test__;
 
@@ -2028,7 +2049,7 @@ describe("tool registration", () => {
 
   it("rejects a top-level spawn with no agent and no fork", async () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
     const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
 
@@ -2039,7 +2060,7 @@ describe("tool registration", () => {
 
   it("rejects a top-level spawn naming an unknown agent", async () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
     const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
 
@@ -2054,7 +2075,7 @@ describe("tool registration", () => {
 
   it("exposes a debloated schema: agent+task required, name/model/cwd optional, no override knobs", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
 
     const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
@@ -2087,7 +2108,7 @@ describe("tool registration", () => {
 
   it("renders partial subagent tool-call args without throwing", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
 
     const subagentTool = registeredTools.find((tool) => tool.name === "subagent");
     assert.ok(subagentTool, "expected subagent tool to be registered");
@@ -2108,7 +2129,7 @@ describe("tool registration", () => {
 
   it("registers subagent_message with name + message both required (name-only addressing)", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
 
     const messageTool = registeredTools.find((tool) => tool.name === "subagent_message");
     assert.ok(messageTool, "expected subagent_message tool to be registered");
@@ -2132,7 +2153,7 @@ describe("tool registration", () => {
 
   it("no longer registers subagent_interrupt or subagent_resume", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
     const names = registeredTools.map((tool) => tool.name);
     assert.equal(names.includes("subagent_interrupt"), false);
     assert.equal(names.includes("subagent_resume"), false);
@@ -2328,7 +2349,7 @@ describe("subagent interruption", () => {
 
   it("registers subagent_message and not the old interrupt/resume tools", () => {
     const { api, registeredTools } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
     const names = registeredTools.map((tool) => tool.name);
     assert.equal(names.includes("subagent_message"), true);
     assert.equal(names.includes("subagent_interrupt"), false);
@@ -2651,7 +2672,7 @@ describe("subagent status renderer", () => {
 
   it("renders only capped lines plus overflow", () => {
     const { api, registeredMessageRenderers } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
 
     const rendererEntry = registeredMessageRenderers.find(
       (entry) => entry.name === "subagent_status",
@@ -2687,7 +2708,7 @@ describe("subagent status renderer", () => {
 
   it("stays within narrow widths", () => {
     const { api, registeredMessageRenderers } = createMockExtensionApi();
-    (subagentsModule as any).default(api);
+    registerSubagentsForTest(api);
 
     const rendererEntry = registeredMessageRenderers.find(
       (entry) => entry.name === "subagent_status",

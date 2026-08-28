@@ -1195,6 +1195,7 @@ export const __test__ = {
   contextWindowFor,
   formatUsageSegments,
   widgetIcon,
+  registerExtension: registerSubagentsExtension,
 };
 
 function startWidgetRefresh() {
@@ -1579,6 +1580,16 @@ async function watchSubagent(
 }
 
 export default function subagentsExtension(pi: ExtensionAPI) {
+  // Do not expose tools that cannot work outside herdr. Keeping this check at
+  // registration time prevents the model from seeing and attempting unusable
+  // subagent tools in a regular terminal. Execution-time checks remain below
+  // as a defensive guard in case herdr becomes unavailable after startup.
+  if (!isMuxAvailable()) return;
+
+  registerSubagentsExtension(pi);
+}
+
+function registerSubagentsExtension(pi: ExtensionAPI) {
   latestPi = pi;
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
