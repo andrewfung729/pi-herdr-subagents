@@ -6,7 +6,7 @@ Async subagents for [pi](https://github.com/earendil-works/pi), running in [herd
 
 ## How it works
 
-`subagent()` returns immediately. The sub-agent runs in its own herdr pane — a right split off the parent pi pane (`herdr pane split --current --direction right --cwd … --no-focus`), so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
+`subagent()` returns immediately. The first sub-agent opens as a right split off the parent pi pane; additional concurrent sub-agents split downward from that right-hand stack. The main session therefore stays as the left column while sub-agents share the right column, and pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
 
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
@@ -28,7 +28,7 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 ## Differences from the tmux version
 
 - **Surface layer**: `pi-extension/subagents/herdr.ts` replaces `tmux.ts`. Same API (create/split, send, read, close, poll-for-exit), backed by `herdr pane split|run|read|close`.
-- **No automatic layout rebalancing.** tmux's `select-layout even-horizontal` has no herdr equivalent; repeated right-splits follow herdr's default split ratio. Resize panes manually (`herdr pane resize`) or split `--direction down` when columns get narrow.
+- **Stable two-column layout.** The first sub-agent splits right from its parent session; later concurrent sub-agents split down within that right-hand subtree. Herdr controls the vertical split ratios; resize panes manually with `herdr pane resize` when needed.
 - **Screen reads** use herdr's `recent-unwrapped` snapshot (soft-wrapped rows joined), requesting a 200-rendered-row window and tail-slicing in JS (herdr's small `--lines` values truncate or misbehave). Output on an agent's alternate screen that never enters the terminal stream cannot be recovered — same caveat as tmux scrollback, but bounded.
 - **Pane ids** are herdr workspace-qualified ids (`w1:p3`), not tmux `%N` ids.
 
@@ -192,7 +192,7 @@ herdr          # start or attach to the persistent session
 pi
 ```
 
-Subagent panes are created with `herdr pane split --current --direction right --cwd "$PWD" --no-focus`, so they always follow the pi pane that spawned them — no focus stealing, no hunting for the right window.
+The first subagent pane is created with `herdr pane split --current --direction right --cwd "$PWD" --no-focus`. Additional concurrent panes target the newest subagent pane with `--direction down`, keeping the parent on the left and the subagent stack on the right without stealing focus.
 
 ## Development
 

@@ -17,9 +17,11 @@ import {
   closeSurface,
   createTestEnv,
   createTrackedSurface,
+  createTrackedSurfaceSplit,
   getAvailableBackends,
   getCurrentPaneId,
   getFocusedSurface,
+  getPaneLayout,
   readScreen,
   readScreenAsync,
   sendCommand,
@@ -52,15 +54,36 @@ for (const backend of backends) {
       cleanupTestEnv(env);
     });
 
-    it("keeps focus on the active surface while creating and targeting subagent surfaces", async () => {
-      // The pane running this test process is the split source for every
-      // subagent surface; spawning must never steal the user's focus.
+    it("keeps the parent left and stacks subagent surfaces on the right", async () => {
       const caller = getCurrentPaneId();
       const focusBefore = getFocusedSurface();
       assert.ok(focusBefore !== null, "Expected a focused pane in the herdr session");
 
+      // The first subagent splits right from the caller.
       const childA = createTrackedSurface(env, "focus-child-a");
-      const childB = createTrackedSurface(env, "focus-child-b");
+      const layoutAfterFirst = getPaneLayout(caller);
+      const callerAfterFirst = layoutAfterFirst.panes.find((pane) => pane.pane_id === caller);
+      const childAfterFirst = layoutAfterFirst.panes.find((pane) => pane.pane_id === childA);
+      assert.ok(callerAfterFirst);
+      assert.ok(childAfterFirst);
+
+      // The second subagent splits down from the first, not right from the
+      // caller. The caller therefore keeps exactly the same left-column rect.
+      const childB = createTrackedSurfaceSplit(env, "focus-child-b", "down", childA);
+      const layoutAfterSecond = getPaneLayout(caller);
+      const callerAfterSecond = layoutAfterSecond.panes.find((pane) => pane.pane_id === caller);
+      const childTop = layoutAfterSecond.panes.find((pane) => pane.pane_id === childA);
+      const childBottom = layoutAfterSecond.panes.find((pane) => pane.pane_id === childB);
+      assert.ok(callerAfterSecond);
+      assert.ok(childTop);
+      assert.ok(childBottom);
+      assert.deepEqual(callerAfterSecond.rect, callerAfterFirst.rect);
+      assert.equal(childTop.rect.x, childAfterFirst.rect.x);
+      assert.equal(childBottom.rect.x, childAfterFirst.rect.x);
+      assert.equal(childTop.rect.width, childAfterFirst.rect.width);
+      assert.equal(childBottom.rect.width, childAfterFirst.rect.width);
+      assert.ok(childTop.rect.y < childBottom.rect.y);
+
       await sleep(SHELL_READY_DELAY_MS);
       assert.equal(getFocusedSurface(), focusBefore);
 
@@ -73,9 +96,7 @@ for (const backend of backends) {
         waitForScreen(childA, new RegExp(`FOCUS_A_${markerA}`), 20_000, 50),
         waitForScreen(childB, new RegExp(`FOCUS_B_${markerB}`), 20_000, 50),
       ]);
-      // Sending commands into background panes must not focus them either.
       assert.equal(getFocusedSurface(), focusBefore);
-      // And the calling pane is unchanged (surfaces split off --current).
       assert.equal(getCurrentPaneId(), caller);
     });
 

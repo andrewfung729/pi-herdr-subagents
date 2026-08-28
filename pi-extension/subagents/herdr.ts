@@ -7,8 +7,9 @@
  * index.ts stays testable without a multiplexer running.
  *
  * Panes are identified by herdr workspace-qualified pane ids (e.g. `w1:p1`).
- * Splits always target the parent pi's pane (`--current`, resolved from
- * HERDR_PANE_ID) so they follow the agent rather than the user's focus.
+ * A split can target the parent pi pane (`--current`, resolved from
+ * HERDR_PANE_ID) or an explicit pane id, so callers can build a stable
+ * two-column layout with subagents stacked vertically on the right.
  *
  * Ported from the tmux surface of amosblomqvist/pi-interactive-subagents.
  */
@@ -105,11 +106,12 @@ function isPaneGoneError(error: any): boolean {
 // ── Surface primitives ──
 
 /**
- * Create a new pane for a subagent: a right split off the parent pi's pane
- * (`--current`), with the caller's working directory preserved and focus kept
- * on the parent — matching `herdr pane split --current --direction right
- * --cwd "$PWD" --no-focus` from the herdr agent skill. The pane is renamed to
- * the subagent name (best-effort) so the herdr sidebar shows a useful label.
+ * Create the first pane in a subagent stack: a right split off the parent pi's
+ * pane (`--current`), with the caller's working directory preserved and focus
+ * kept on the parent. Later panes can use `createSurfaceSplit(..., "down",
+ * existingSurface)` to remain in the same right-hand column. The pane is
+ * renamed to the subagent name (best-effort) so the herdr sidebar shows a
+ * useful label.
  *
  * Returns the new pane id (e.g. `w1:p3`).
  */

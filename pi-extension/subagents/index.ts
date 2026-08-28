@@ -22,6 +22,7 @@ import {
 import {
   closeSurface,
   createSurface,
+  createSurfaceSplit,
   isMuxAvailable,
   muxSetupHint,
   pollForExit,
@@ -636,6 +637,37 @@ interface RunningSubagent {
 /** All currently running subagents, keyed by id. */
 const runningSubagents = new Map<string, RunningSubagent>();
 
+/**
+ * Surfaces created by launches that are waiting for their shell-ready delay.
+ * A separate reservation is necessary because parallel tool calls can start a
+ * second launch before the first one has registered in `runningSubagents`.
+ */
+const launchingSubagentSurfaces = new Set<string>();
+
+/**
+ * Pick the newest pane in this session's right-hand subagent stack.
+ * Launch reservations take precedence because they are newer than every entry
+ * already registered in `runningSubagents`.
+ */
+function selectSubagentSurfaceAnchor(): string | undefined {
+  let anchor: string | undefined;
+  for (const running of runningSubagents.values()) anchor = running.surface;
+  for (const surface of launchingSubagentSurfaces) anchor = surface;
+  return anchor;
+}
+
+/**
+ * Keep the parent session as the left column: the first subagent splits right
+ * from the parent, and later subagents split down from the existing right-hand
+ * stack. Reserve the pane synchronously so concurrent launches use it.
+ */
+function createSubagentSurface(name: string): string {
+  const anchor = selectSubagentSurfaceAnchor();
+  const surface = anchor ? createSurfaceSplit(name, "down", anchor) : createSurface(name);
+  launchingSubagentSurfaces.add(surface);
+  return surface;
+}
+
 // When this extension is loaded inside a subagent that itself spawns children
 // (e.g. a worker delegating to scout/researcher), `subagent-done.ts` runs in the
 // same process and needs to know whether this session still has children in
@@ -1150,6 +1182,8 @@ export const __test__ = {
   resolveRunningByName,
   uniqueRunningName,
   reservedNames,
+  launchingSubagentSurfaces,
+  selectSubagentSurfaceAnchor,
   steerSubagent,
   handleSubagentSteer,
   resolveResultPresentation,
@@ -1224,12 +1258,18 @@ async function launchSubagent(
   ].join("-");
   const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
 
-  // Use pre-created surface (parallel mode) or create a new one.
-  // For new surfaces, pause briefly so the shell is ready before sending the command.
+  // Use a pre-created surface when supplied. Otherwise keep a two-column
+  // layout: first subagent to the right, later concurrent subagents stacked
+  // downward in that right-hand column. The reservation makes parallel tool
+  // calls observe panes that are still in their shell-ready delay.
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name);
+  const surface = options?.surface ?? createSubagentSurface(params.name);
   if (!surfacePreCreated) {
-    await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
+    } finally {
+      launchingSubagentSurfaces.delete(surface);
+    }
   }
 
   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
@@ -1571,6 +1611,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       agent.abortController?.abort();
     }
     runningSubagents.clear();
+    launchingSubagentSurfaces.clear();
   });
 
   // The spawning tools are always registered here. Whether a child process can
@@ -2045,8 +2086,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       // transcript doesn't block the UI.
       const entryCountBefore = countSessionEntryLines(sessionPath);
 
-      const surface = createSurface(name);
-      await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
+      const surface = createSubagentSurface(name);
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
+      } finally {
+        launchingSubagentSurfaces.delete(surface);
+      }
 
       // Build pi resume command
       const parts = ["pi", "--session", shellEscape(sessionPath)];

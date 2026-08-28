@@ -104,6 +104,25 @@ export function getFocusedSurface(): string | null {
   }
 }
 
+export interface PaneLayout {
+  panes: Array<{
+    pane_id: string;
+    rect: { x: number; y: number; width: number; height: number };
+  }>;
+}
+
+/** Read the tab layout containing `surface`. */
+export function getPaneLayout(surface: string): PaneLayout {
+  const stdout = execFileSync("herdr", ["pane", "layout", "--pane", surface], {
+    encoding: "utf8",
+  });
+  const layout = JSON.parse(stdout)?.result?.layout;
+  if (!layout || !Array.isArray(layout.panes)) {
+    throw new Error(`Unexpected herdr pane layout output: ${stdout}`);
+  }
+  return layout;
+}
+
 /**
  * Wait until `surface` is the focused pane (used to move focus before
  * assertions that spawning must not steal it).

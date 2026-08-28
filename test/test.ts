@@ -2432,6 +2432,30 @@ describe("subagent interruption", () => {
     }
   });
 
+  it("stacks concurrent subagent surfaces below the newest right-hand pane", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const runningMap = testApi.runningSubagents as Map<string, any>;
+    const launching = testApi.launchingSubagentSurfaces as Set<string>;
+    runningMap.clear();
+    launching.clear();
+
+    try {
+      // No existing subagent means the first launch should split right from the parent.
+      assert.equal(testApi.selectSubagentSurfaceAnchor(), undefined);
+
+      runningMap.set("a1", makeRunning({ id: "a1", surface: "right-top" }));
+      assert.equal(testApi.selectSubagentSurfaceAnchor(), "right-top");
+
+      // A pane still in its shell-ready delay is newer than registered panes.
+      // This reservation is what makes simultaneous tool calls stack correctly.
+      launching.add("right-bottom");
+      assert.equal(testApi.selectSubagentSurfaceAnchor(), "right-bottom");
+    } finally {
+      runningMap.clear();
+      launching.clear();
+    }
+  });
+
   it("steers a running subagent by typing into its pane (newlines flattened)", () => {
     const testApi = (subagentsModule as any).__test__;
     let sentSurface = "";
