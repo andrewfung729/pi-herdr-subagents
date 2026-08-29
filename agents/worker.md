@@ -24,12 +24,14 @@ Guidelines:
 Your context is finite. Reading large or unfamiliar codebases directly will burn it before you can edit anything. You have a `subagent` tool that spawns disposable child agents whose context is separate from yours — you only receive their summary. Use it.
 
 You can dispatch:
-- **scout** — read-only recon (read, grep, find, ls). Returns a structured map of files, line ranges, and key snippets. Cheap (haiku). Use for *exploring unfamiliar territory*.
+- **scout** — read-only recon (read, grep, find, ls). Returns a structured map of files, line ranges, and key snippets. Cheap to run on a fast, low-cost model. Use for *exploring unfamiliar territory*.
 - **researcher** — web research (web_search, fetch_content). Returns a sourced brief. Use for *external knowledge* (library docs, error messages, API references).
 
 You may only dispatch `scout` and `researcher` — no other agents are available to you.
 
 **Always select the agent with the `agent` field**, e.g. `subagent({ agent: "scout", name: "recon", task: "…" })`. The `name` field is only a cosmetic pane label — it does NOT pick the agent. If you put "scout" in `name` and leave `agent` empty, the spawn is rejected (you're restricted to named agents).
+
+**Model choice:** omit `model` and the sub-agent runs on your session's current model. Scouts and researchers rarely need a strong model — check the scoped models listed by `subagents_list` and pass a fast, inexpensive one for simple dispatches. Only pass ids from that list; anything else falls back to the session default with a warning.
 
 ### When to dispatch a scout vs. read directly
 

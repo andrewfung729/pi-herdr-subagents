@@ -17,6 +17,11 @@ import {
 } from "../pi-extension/subagents/herdr.ts";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
+  formatModelMenu,
+  resolveSpawnModel,
+  splitThinkingSuffix,
+} from "../pi-extension/subagents/models.ts";
+import {
   appendBranchSummary,
   copySessionFile,
   countSessionEntryLines,
@@ -1461,6 +1466,134 @@ describe("subagent discovery", () => {
     });
   });
 
+  describe("resolveSpawnModel", () => {
+    const scoped = [
+      { provider: "zai", id: "glm-5.3" },
+      { provider: "zai", id: "glm-5.3-flash" },
+      { provider: "openai-codex", id: "gpt-5.6-sol" },
+    ];
+    const session = { provider: "zai", id: "glm-5.3-flash" };
+
+    it("passes a scoped model reference through unchanged", () => {
+      assert.deepEqual(resolveSpawnModel({ requestedModel: "zai/glm-5.3", scopedModels: scoped }), {
+        model: "zai/glm-5.3",
+        warning: null,
+      });
+    });
+
+    it("matches a bare id and is case-insensitive", () => {
+      const r = resolveSpawnModel({ requestedModel: "GLM-5.3-FLASH", scopedModels: scoped });
+      assert.equal(r.model, "GLM-5.3-FLASH");
+      assert.equal(r.warning, null);
+    });
+
+    it("accepts a thinking suffix on a scoped reference", () => {
+      assert.deepEqual(
+        resolveSpawnModel({ requestedModel: "zai/glm-5.3:high", scopedModels: scoped }),
+        { model: "zai/glm-5.3:high", warning: null },
+      );
+    });
+
+    it("falls back to the session model with a warning when the request is out of scope", () => {
+      const r = resolveSpawnModel({
+        requestedModel: "openrouter/z-ai/glm-5.3",
+        sessionModel: session,
+        scopedModels: scoped,
+      });
+      assert.equal(r.model, "zai/glm-5.3-flash");
+      assert.match(r.warning ?? "", /openrouter\/z-ai\/glm-5\.3/);
+      assert.match(r.warning ?? "", /zai\/glm-5\.3-flash/);
+    });
+
+    it("falls back to the agent pin before the session model", () => {
+      const r = resolveSpawnModel({
+        requestedModel: "flash",
+        agentModel: "anthropic/claude-haiku-4-5",
+        sessionModel: session,
+        scopedModels: scoped,
+      });
+      assert.equal(r.model, "anthropic/claude-haiku-4-5");
+      assert.match(r.warning ?? "", /pinned/);
+    });
+
+    it("falls back to pi default when nothing else is set", () => {
+      const r = resolveSpawnModel({ requestedModel: "nope", scopedModels: scoped });
+      assert.equal(r.model, null);
+      assert.match(r.warning ?? "", /pi default/);
+    });
+
+    it("skips validation when no scoped models are configured", () => {
+      assert.deepEqual(resolveSpawnModel({ requestedModel: "anything/at-all", scopedModels: [] }), {
+        model: "anything/at-all",
+        warning: null,
+      });
+    });
+
+    it("defaults to the spawning session's model", () => {
+      assert.deepEqual(resolveSpawnModel({ sessionModel: session, scopedModels: scoped }), {
+        model: "zai/glm-5.3-flash",
+        warning: null,
+      });
+    });
+
+    it("prefers the agent pin over the session model", () => {
+      const r = resolveSpawnModel({
+        agentModel: "anthropic/claude-haiku-4-5",
+        sessionModel: session,
+        scopedModels: scoped,
+      });
+      assert.equal(r.model, "anthropic/claude-haiku-4-5");
+      assert.equal(r.warning, null);
+    });
+
+    it("returns null when nothing is specified", () => {
+      assert.deepEqual(resolveSpawnModel({ scopedModels: scoped }), { model: null, warning: null });
+    });
+  });
+
+  describe("splitThinkingSuffix", () => {
+    it("splits valid thinking-level suffixes", () => {
+      assert.deepEqual(splitThinkingSuffix("zai/glm-5.3:high"), {
+        base: "zai/glm-5.3",
+        suffix: "high",
+      });
+    });
+
+    it("keeps colon-containing ids that do not end in a thinking level", () => {
+      assert.deepEqual(splitThinkingSuffix("openrouter/openai/gpt-5.4:exacto"), {
+        base: "openrouter/openai/gpt-5.4:exacto",
+        suffix: null,
+      });
+    });
+  });
+
+  describe("formatModelMenu", () => {
+    it("lists scoped ids and the session default", () => {
+      const menu = formatModelMenu({
+        sessionModel: { provider: "zai", id: "glm-5.3-flash" },
+        scopedModels: [
+          { provider: "zai", id: "glm-5.3" },
+          { provider: "zai", id: "glm-5.3-flash" },
+        ],
+      });
+      assert.match(menu, /current model \(zai\/glm-5\.3-flash\)/);
+      assert.match(menu, /zai\/glm-5\.3, zai\/glm-5\.3-flash/);
+    });
+
+    it("notes when no scoped models are configured", () => {
+      const menu = formatModelMenu({
+        sessionModel: { provider: "zai", id: "glm-5.3-flash" },
+        scopedModels: [],
+      });
+      assert.match(menu, /No scoped models are configured/);
+    });
+
+    it("falls back to pi default wording without a session model", () => {
+      const menu = formatModelMenu({ sessionModel: null, scopedModels: null });
+      assert.match(menu, /pi's default model/);
+    });
+  });
+
   it("buildPiPromptArgs inserts separator for artifact-backed launches with skills", () => {
     assert.deepEqual(
       testApi.buildPiPromptArgs({
@@ -1512,11 +1645,18 @@ describe("subagent discovery", () => {
       const tool = registeredTools.find((tool) => tool.name === "subagents_list");
       assert.ok(tool, "expected subagents_list to be registered");
 
-      const result = await tool.execute();
+      const result = await tool.execute("call-1", {}, undefined, undefined, {
+        model: { provider: "zai", id: "glm-5.3-flash" },
+        scopedModels: [{ model: { provider: "zai", id: "glm-5.3" } }],
+      } as any);
       const agents = result.details?.agents ?? [];
 
       assert.ok(agents.some((agent: any) => agent.name === "visible-discovery-test-agent"));
       assert.match(result.content[0].text, /visible-discovery-test-agent/);
+      // The scoped-model menu is appended for spawn-time `model` choices.
+      assert.match(result.content[0].text, /Model selection/);
+      assert.match(result.content[0].text, /current model \(zai\/glm-5\.3-flash\)/);
+      assert.match(result.content[0].text, /zai\/glm-5\.3/);
     });
   });
 
@@ -1540,7 +1680,10 @@ describe("subagent discovery", () => {
       const tool = registeredTools.find((tool) => tool.name === "subagents_list");
       assert.ok(tool, "expected subagents_list to be registered");
 
-      const result = await tool.execute();
+      const result = await tool.execute("call-1", {}, undefined, undefined, {
+        model: null,
+        scopedModels: [],
+      } as any);
       const agents = result.details?.agents ?? [];
 
       assert.equal(
@@ -1587,7 +1730,10 @@ describe("subagent discovery", () => {
       const tool = registeredTools.find((tool) => tool.name === "subagents_list");
       assert.ok(tool, "expected subagents_list to be registered");
 
-      const result = await tool.execute();
+      const result = await tool.execute("call-1", {}, undefined, undefined, {
+        model: null,
+        scopedModels: [],
+      } as any);
       const agents = result.details?.agents ?? [];
 
       assert.equal(

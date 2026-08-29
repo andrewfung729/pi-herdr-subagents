@@ -9,7 +9,7 @@ Fork chain: [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interac
 - **herdr-only surface:** all terminal operations via the `herdr` CLI (`pi-extension/subagents/herdr.ts`); two-column layout with vertical stacking; `recent-unwrapped` screen reads; workspace-qualified pane ids (`w1:p3`); tools register only inside herdr; version gate (`>=0.8.2` required, skill pinned to 0.8.2 in `skills/herdr/`, verified by `check:herdr-skill`).
 - **One parent wake per batch:** completions stream in individually; the parent turn triggers once per autonomous batch.
 - **Failures surface, never hang:** fatal startup stalls escalate after 60 s (read pane → synthesize `.exit` → deliver failure result); vanished panes error out; explicit spawn names reserved synchronously.
-- **pi-only execution:** every sub-agent is a pi process; bundled agents follow pi's default model; web tools via pi-web-access (`fetch_content`, `source_check`, `get_search_content`); shell is plain `bash`; role folders use `AGENTS.md`.
+- **pi-only execution:** every sub-agent is a pi process; bundled agents run on the spawning session's current model; web tools via pi-web-access (`fetch_content`, `source_check`, `get_search_content`); shell is plain `bash`; role folders use `AGENTS.md`.
 - **Dev infra:** pnpm, Biome + tsgo (`pnpm check`), husky pre-commit, three-tier test suite.
 
 Upstream repos document a different system (tmux surface, different tool names and models, other CLI backends). Read their issues and PRs for history, but trust this repo's docs and code for behavior.
@@ -56,7 +56,7 @@ test/
 - **Biome only covers `pi-extension/**` and `test/**`** (see `biome.json` `files.includes`). Keep scripts/ clean anyway; 2-space indent, width 100.
 - **herdr surface quirks:** screen reads use the `recent-unwrapped` snapshot with a 200-row window tail-sliced in JS (small `--lines` values truncate); pane ids are workspace-qualified (`w1:p3`), never tmux `%N`; panes are created `--no-focus`. Herdr >=0.9.0 is untested — compatibility is gated by version.
 - **Tool access is whitelist-only.** Children launch with `--no-extensions --tools <allowlist>`; only extensions backing listed tools are re-loaded. Spawning depth is enforced via `PI_SUBAGENT_ALLOWED`. Don't weaken this.
-- **Bundled agents omit `model`** so they follow pi's default model. `subagent_agents` frontmatter both grants and restricts the spawning toolset.
+- **Bundled agents omit `model`** so they run on the spawning session's current model. `subagents_list` exposes the session's scoped models, and spawn-time `model` parameters are validated against them (invalid ids fall back with a warning). `subagent_agents` frontmatter both grants and restricts the spawning toolset.
 - **Docs are the spec:** `README.md` describes observable behavior in detail (resume, loadout snapshots, auto-exit, fatal-stall escalation). If you change behavior, update README in the same change.
 - **config.json is gitignored** (copy from `config.json.example`); the `.memory/` dir is also ignored.
 - Tests use `node --test` with type-stripped TS — no test framework deps. Integration tests run `--test-concurrency=1` because they share one herdr workspace.

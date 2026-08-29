@@ -32,6 +32,7 @@ import {
   sendLongCommand,
   shellEscape,
 } from "./herdr.ts";
+import { formatModelMenu, resolveSpawnModel, type SessionModel } from "./models.ts";
 import {
   countSessionEntryLines,
   findLastAssistantMessage,
@@ -112,7 +113,14 @@ const SubagentParams = Type.Object({
         "Has no effect on which agent runs — use `agent` for that.",
     }),
   ),
-  model: Type.Optional(Type.String({ description: "Model override (overrides agent default)" })),
+  model: Type.Optional(
+    Type.String({
+      description:
+        "Model override as provider/id, e.g. from the scoped models listed by subagents_list. " +
+        "Validated against this session's scoped models when those are configured — an out-of-scope " +
+        "id falls back to the session default with a warning. Omit to run on this session's current model.",
+    }),
+  ),
   cwd: Type.Optional(
     Type.String({
       description:
@@ -646,6 +654,8 @@ interface RunningSubagent {
    * subagent's pane (e.g. planner).
    */
   interactive: boolean;
+  /** Set when a requested `model` failed scoped-model validation and fell back. */
+  modelWarning?: string | null;
 }
 
 /** All currently running subagents, keyed by id. */
@@ -1275,6 +1285,10 @@ async function launchSubagent(
       getSessionDir(): string;
     };
     cwd: string;
+    /** The spawning session's current model, when one is active. */
+    model?: SessionModel | null;
+    /** The spawning session's scoped models, when any are configured. */
+    scopedModels?: readonly SessionModel[] | null;
   },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
@@ -1282,7 +1296,14 @@ async function launchSubagent(
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = params.model ?? agentDefs?.model;
+  const modelResolution = resolveSpawnModel({
+    requestedModel: params.model,
+    agentModel: agentDefs?.model,
+    sessionModel: ctx.model ?? null,
+    scopedModels: ctx.scopedModels ?? null,
+  });
+  const effectiveModel = modelResolution.model ?? undefined;
+  const modelWarning = modelResolution.warning;
   const effectiveTools = agentDefs?.tools;
   const effectiveSkills = agentDefs?.skills;
   const effectiveThinking = agentDefs?.thinking;
@@ -1497,6 +1518,7 @@ async function launchSubagent(
       source: "pi",
       startTimeMs: startTime,
     }),
+    modelWarning,
   };
 
   runningSubagents.set(id, running);
@@ -1940,7 +1962,18 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       // `name` is guaranteed non-empty here: defaulted above when missing.
       let running: RunningSubagent;
       try {
-        running = await launchSubagent({ ...params, name: params.name ?? params.agent }, ctx);
+        running = await launchSubagent(
+          { ...params, name: params.name ?? params.agent },
+          {
+            sessionManager: ctx.sessionManager,
+            cwd: ctx.cwd,
+            model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
+            scopedModels: ctx.scopedModels?.map((s) => ({
+              provider: s.model.provider,
+              id: s.model.id,
+            })),
+          },
+        );
       } finally {
         if (reservedName) reservedNames.delete(reservedName);
       }
@@ -2003,11 +2036,13 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
         });
 
       // Return immediately
+      const modelWarningPrefix = running.modelWarning ? `${running.modelWarning} ` : "";
       return {
         content: [
           {
             type: "text",
             text:
+              modelWarningPrefix +
               `Sub-agent "${params.name}" launched and is now running in the background. ` +
               `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
               `The result will be delivered automatically; concurrent autonomous results trigger one steer after the batch finishes. ` +
@@ -2022,6 +2057,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
           sessionFile: running.sessionFile,
           launchScriptFile: running.launchScriptFile,
           status: "started",
+          ...(running.modelWarning ? { modelWarning: running.modelWarning } : {}),
         },
       };
     },
@@ -2089,21 +2125,29 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
     name: "subagents_list",
     label: "List Subagents",
     description:
-      "List all available subagent definitions. " +
+      "List all available subagent definitions plus the models usable by the subagent tool. " +
       "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
       "Project-local agents override global ones with the same name.",
     promptSnippet:
-      "List all available subagent definitions. " +
+      "List all available subagent definitions plus the models usable by the subagent tool. " +
       "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
       "Project-local agents override global ones with the same name.",
     parameters: Type.Object({}),
 
-    async execute() {
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation);
+
+      const modelMenu = formatModelMenu({
+        sessionModel: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
+        scopedModels: ctx.scopedModels?.map((s) => ({
+          provider: s.model.provider,
+          id: s.model.id,
+        })),
+      });
 
       if (list.length === 0) {
         return {
-          content: [{ type: "text", text: "No subagent definitions found." }],
+          content: [{ type: "text", text: `No subagent definitions found.\n\n${modelMenu}` }],
           details: { agents: [] },
         };
       }
@@ -2116,7 +2160,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       });
 
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
+        content: [{ type: "text", text: `${lines.join("\n")}\n\n${modelMenu}` }],
         details: { agents: list },
       };
     },

@@ -50,7 +50,7 @@ Five things define this project as it stands. Each subsection is a capability yo
 ### Sub-agents run on pi, with pi's defaults
 
 - Every sub-agent process is pi — one executor everywhere.
-- Bundled agents omit `model:` and follow pi's default model, set in settings or inherited from the spawning session.
+- Bundled agents omit `model:` and run on the spawning session's current model; spawn-time `model` parameters are validated against the session's scoped models (see [Model selection](#model-selection)).
 - Web tools (`web_search`, `fetch_content`, `source_check`, `get_search_content`) are provided by the [pi-web-access](https://pi.dev/packages/pi-web-access) package.
 - Shell access is plain `bash`.
 - Custom agents are pi frontmatter only; role folders are configured with `AGENTS.md`.
@@ -117,11 +117,22 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 
 | Agent | Model | Tools | Role |
 | ----- | ----- | ----- | ---- |
-| **scout** | pi default | `read`, `grep`, `find`, `ls` | Fast read-only codebase recon |
-| **researcher** | pi default | `web_search`, `fetch_content` | Web research, synthesized into a sourced brief |
-| **worker** | pi default | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content` + spawning | General implementer; may spawn `scout` and `researcher` |
+| **scout** | session model | `read`, `grep`, `find`, `ls` | Fast read-only codebase recon |
+| **researcher** | session model | `web_search`, `fetch_content` | Web research, synthesized into a sourced brief |
+| **worker** | session model | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content` + spawning | General implementer; may spawn `scout` and `researcher` |
 
-Bundled agents omit `model`, so they follow pi's default model (set in settings or the spawning session). Set `model:` in an override file to pin one. All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
+Bundled agents omit `model`, so they run on the spawning session's current model (see [Model selection](#model-selection)). Set `model:` in an override file to pin one. All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
+
+### Model selection
+
+Spawn-time model resolution, most explicit source first:
+
+1. **`model` parameter** on the `subagent` call — validated against the session's scoped models (`enabledModels`) when those are configured. An out-of-scope id never reaches the child: the spawn proceeds on the next source below and the tool result includes a warning saying so.
+2. **Agent `model:` pin** — a definition's frontmatter overrides the session default. Not scope-validated: the pin is a deliberate config choice owned by the user.
+3. **The spawning session's current model** — the default when neither of the above is set, so a sub-agent deterministically matches its caller instead of re-resolving pi's fresh-start default (which can differ: `enabledModels[0]` outranks the saved default model).
+4. **pi's default** — only when the spawning session has no active model.
+
+`subagents_list` lists the exact usable ids in its "Model selection" section. Thinking levels still come from the agent's `thinking:` frontmatter; a `model: provider/id:level` suffix applies only when the definition doesn't pin `thinking:`.
 
 ## Custom agents
 
@@ -131,7 +142,7 @@ Place a `.md` file in `.pi/agents/` (project) or `~/.pi/agent/agents/` (global).
 ---
 name: my-agent
 description: Does something specific
-model: openrouter/z-ai/glm-5.3
+model: provider/model-id
 thinking: medium
 tools: read, edit, write, bash, web_search
 session-mode: lineage-only
@@ -147,7 +158,7 @@ You are a specialized agent that does X...
 | ----- | ---- | ----------- |
 | `name` | string | Agent name (used in `agent: "my-agent"`) |
 | `description` | string | Shown in `subagents_list` |
-| `model` | string | Default model |
+| `model` | string | Default model (`provider/id`). Overrides the session default; a spawn-time `model` parameter still wins |
 | `thinking` | string | `minimal`, `low`, `medium`, or `high` |
 | `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `fetch_content`, `source_check`, `get_search_content` (from the [pi-web-access](https://pi.dev/packages/pi-web-access) package). Only the extensions backing the listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
@@ -217,7 +228,7 @@ Status display is configured via `config.json` in the extension directory (copy 
 
 ### Fatal startup stalls
 
-A sub-agent whose `pi` process fails before its agent loop starts (missing provider API key, unknown model, a launch script that dies instantly) never fires `agent_start`/`agent_end`, so it would otherwise sit at its interactive prompt forever and the parent would wait forever on a silent "stalled" status. The watcher escalates this case: when an autonomous sub-agent has been stalled at startup for 60 seconds (`FATAL_STALL_AFTER_SECONDS`) with no agent activity ever recorded, it reads the pane screen, extracts the error text (e.g. `Error: No API key found for openrouter.`), synthesizes the child's `.exit` error sidecar, closes the pane, and delivers a normal failure result (`Sub-agent "x" failed (provider/agent error)` with the underlying message) to the parent. Interactive sub-agents are exempt — the user drives those panes directly.
+A sub-agent whose `pi` process fails before its agent loop starts (missing provider API key, unknown model, a launch script that dies instantly) never fires `agent_start`/`agent_end`, so it would otherwise sit at its interactive prompt forever and the parent would wait forever on a silent "stalled" status. The watcher escalates this case: when an autonomous sub-agent has been stalled at startup for 60 seconds (`FATAL_STALL_AFTER_SECONDS`) with no agent activity ever recorded, it reads the pane screen, extracts the error text (e.g. `Error: No API key found for <provider>.`), synthesizes the child's `.exit` error sidecar, closes the pane, and delivers a normal failure result (`Sub-agent "x" failed (provider/agent error)` with the underlying message) to the parent. Interactive sub-agents are exempt — the user drives those panes directly.
 
 If your shell startup is legitimately slower than the threshold (e.g. heavy `direnv` hooks in the child cwd), raise `PI_SUBAGENT_SHELL_READY_DELAY_MS` so the launch command is sent later, or spawn the sub-agent with a working environment. A pane that disappears mid-run (closed from the herdr UI, or a herdr restart) is reported to the parent as `Subagent pane closed before completion` instead of hanging the wait.
 
