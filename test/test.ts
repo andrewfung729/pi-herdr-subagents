@@ -2740,7 +2740,7 @@ describe("subagent interruption", () => {
       "",
       "Use /login to log into a provider via OAuth or API key.",
       "[researcher] — 3 tools  (Ctrl+Alt+O to expand)",
-      "~/dev/pi-herdr-exp (master)",
+      "~/dev/pi-herdr-subagents (master)",
     ].join("\n");
     assert.equal(extract(screen), "No API key found for openrouter.");
 
