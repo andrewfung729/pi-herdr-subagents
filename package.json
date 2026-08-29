@@ -21,7 +21,7 @@
     "check": "biome check --error-on-warnings . && tsgo --noEmit",
     "check:herdr-skill": "node scripts/check-herdr-skill.ts",
     "fix": "biome check --write --error-on-warnings .",
-    "prepare": "husky"
+    "prepare": "husky || true"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
