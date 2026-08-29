@@ -2,7 +2,7 @@
 
 Async subagents for [pi](https://github.com/earendil-works/pi), running in [herdr](https://herdr.dev) panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**herdr-only fork.** Ported from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblomqvist/pi-interactive-subagents) (the tmux-only fork), which itself forked [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents). All terminal surface operations go through the `herdr` CLI instead of `tmux`.
+**herdr-only fork.** This project runs the async subagent workflow in [herdr](https://herdr.dev) panes: every terminal surface operation goes through the `herdr` CLI, the parent wakes once per batch of sub-agents rather than per completion, and startup failures surface as results instead of hangs. It descends from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblomqvist/pi-interactive-subagents) (tmux-only), itself forked from [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) — see [Acknowledgements](#acknowledgements). [This fork](#this-fork) describes the system as it stands today.
 
 ## How it works
 
@@ -25,12 +25,44 @@ If your shell startup is slow and launch commands get dropped before the prompt 
 export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 ```
 
-## Differences from the tmux version
+## This fork
 
-- **Surface layer**: `pi-extension/subagents/herdr.ts` replaces `tmux.ts`. Same API (create/split, send, read, close, poll-for-exit), backed by `herdr pane split|run|read|close`.
-- **Stable two-column layout.** The first sub-agent splits right from its parent session; later concurrent sub-agents split down within that right-hand subtree. Herdr controls the vertical split ratios; resize panes manually with `herdr pane resize` when needed.
-- **Screen reads** use herdr's `recent-unwrapped` snapshot (soft-wrapped rows joined), requesting a 200-rendered-row window and tail-slicing in JS (herdr's small `--lines` values truncate or misbehave). Output on an agent's alternate screen that never enters the terminal stream cannot be recovered — same caveat as tmux scrollback, but bounded.
-- **Pane ids** are herdr workspace-qualified ids (`w1:p3`), not tmux `%N` ids.
+Five things define this project as it stands. Each subsection is a capability you can rely on; anything not covered here works as described in the rest of this README.
+
+### Fully herdr-native
+
+- Every terminal operation goes through the `herdr` CLI — `herdr pane split|run|read|close`, wrapped in `pi-extension/subagents/herdr.ts`.
+- Stable two-column layout: the first sub-agent splits right off the parent pane; further concurrent sub-agents stack downward in that right-hand subtree. Herdr controls the ratios; adjust with `herdr pane resize`.
+- Screen reads use herdr's `recent-unwrapped` snapshot: a 200-rendered-row window, tail-sliced in JS. Output on an alternate screen that never enters the terminal stream is unrecoverable — bounded, like tmux scrollback.
+- Panes carry workspace-qualified ids (`w1:p3`) and are renamed to the sub-agent's name via `herdr pane rename`, so the herdr sidebar and tab strip stay legible.
+- herdr is a hard dependency: the tools and `/subagent` register only inside a herdr pane. The installed CLI is classified once per process — `>=0.8.2` required, `>=0.9.0` runs with an untested-compatibility warning, and a missing or incompatible runtime raises an error notification. The bundled skill (`skills/herdr/`) is pinned to 0.8.2 and verified by `pnpm run check:herdr-skill`.
+
+### One wake-up per batch
+
+- Completion messages stream into the transcript as each sub-agent finishes, but the parent session's turn triggers exactly **once per autonomous batch** — launches still in flight included. Ten parallel spawns cost one interruption, not ten.
+
+### Failures surface, never hang
+
+- A child pi that dies before its agent loop starts (missing API key, unknown model, crashed launch script) is escalated after 60 seconds of startup stall: the watcher reads the pane screen, extracts the error text, synthesizes the child's `.exit` sidecar, closes the pane, and delivers a normal failure result to the parent.
+- A pane that disappears mid-run reports `Subagent pane closed before completion` instead of waiting forever.
+- Explicitly requested `name:` values are reserved synchronously, so parallel spawns reusing a name auto-suffix (`scout`, `scout-2`, …) without colliding.
+
+### Sub-agents run on pi, with pi's defaults
+
+- Every sub-agent process is pi — one executor everywhere.
+- Bundled agents omit `model:` and follow pi's default model, set in settings or inherited from the spawning session.
+- Web tools (`web_search`, `fetch_content`, `source_check`, `get_search_content`) are provided by the [pi-web-access](https://pi.dev/packages/pi-web-access) package.
+- Shell access is plain `bash`.
+- Custom agents are pi frontmatter only; role folders are configured with `AGENTS.md`.
+
+### Ships with a development setup
+
+- pnpm workspace on the `@earendil-works/*` packages.
+- `pnpm check` — Biome lint/format plus `tsgo` strict typecheck — enforced by a husky pre-commit hook.
+- Three-tier tests: unit (`pnpm test`), herdr surface (`pnpm run test:surface`), full lifecycle (`pnpm run test:integration`).
+- `pnpm run check:herdr-skill` verifies the bundled skill against the pinned herdr release.
+
+See [Development](#development) for the commands.
 
 ## Tools
 
