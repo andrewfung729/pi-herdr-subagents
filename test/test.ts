@@ -1352,6 +1352,49 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("resolves a relative spawn cwd against the session cwd, not process.cwd()", () => {
+    const sessionCwd = mkdtempSync(join(tmpdir(), "subagent-session-cwd-"));
+    try {
+      const { effectiveCwd } = testApi.resolveSubagentPaths(
+        { name: "A", task: "T", agent: "scout", cwd: "role" },
+        null,
+        sessionCwd,
+      );
+      assert.equal(effectiveCwd, join(sessionCwd, "role"));
+    } finally {
+      rmSync(sessionCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("passes an absolute spawn cwd through unchanged", () => {
+    const { effectiveCwd } = testApi.resolveSubagentPaths(
+      { name: "A", task: "T", agent: "scout", cwd: "/tmp/abs-role" },
+      null,
+      "/tmp/anywhere",
+    );
+    assert.equal(effectiveCwd, "/tmp/abs-role");
+  });
+
+  it("resolves an agent frontmatter cwd against the agent config dir", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir, projectDir }) => {
+      const { effectiveCwd } = testApi.resolveSubagentPaths(
+        { name: "A", task: "T", agent: "scout" },
+        { cwd: "roles/sre" },
+        projectDir,
+      );
+      assert.equal(effectiveCwd, join(globalDir, "roles", "sre"));
+    });
+  });
+
+  it("returns null cwd when neither params nor frontmatter specify one", () => {
+    const { effectiveCwd } = testApi.resolveSubagentPaths(
+      { name: "A", task: "T", agent: "scout" },
+      null,
+      "/tmp/anywhere",
+    );
+    assert.equal(effectiveCwd, null);
+  });
+
   it("resolves session mode from frontmatter (standalone default)", () => {
     assert.equal(testApi.resolveEffectiveSessionMode({ name: "A", task: "T" }, null), "standalone");
     assert.equal(

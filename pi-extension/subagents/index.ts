@@ -1231,6 +1231,7 @@ export const __test__ = {
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
   loadAgentDefaults,
+  resolveSubagentPaths,
   discoverAgentDefinitions,
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
