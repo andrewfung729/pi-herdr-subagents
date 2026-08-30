@@ -223,16 +223,16 @@ function isPaneGoneError(error: any): boolean {
 
 /**
  * Create the first pane in a subagent stack: a right split off the parent pi's
- * pane (`--current`), with the caller's working directory preserved and focus
- * kept on the parent. Later panes can use `createSurfaceSplit(..., "down",
- * existingSurface)` to remain in the same right-hand column. The pane is
- * renamed to the subagent name (best-effort) so the herdr sidebar shows a
- * useful label.
+ * pane (`--current`), with the given working directory (defaults to the node
+ * process cwd) and focus kept on the parent. Later panes can use
+ * `createSurfaceSplit(..., "down", existingSurface)` to remain in the same
+ * right-hand column. The pane is renamed to the subagent name (best-effort) so
+ * the herdr sidebar shows a useful label.
  *
  * Returns the new pane id (e.g. `w1:p3`).
  */
-export function createSurface(name: string): string {
-  return createSurfaceSplit(name, "right");
+export function createSurface(name: string, cwd?: string): string {
+  return createSurfaceSplit(name, "right", undefined, cwd);
 }
 
 /**
@@ -245,6 +245,7 @@ export function createSurfaceSplit(
   name: string,
   direction: "right" | "down",
   fromSurface?: string,
+  cwd: string = process.cwd(),
 ): string {
   void name;
   requireHerdr();
@@ -257,7 +258,7 @@ export function createSurfaceSplit(
     "--direction",
     direction === "right" ? "right" : "down",
     "--cwd",
-    process.cwd(),
+    cwd,
     "--no-focus",
   ];
   const stdout = herdr(args);

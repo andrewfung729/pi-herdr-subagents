@@ -332,12 +332,13 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
   };
 }
 
-function discoverAgentDefinitions(): ListedAgentDefinition[] {
+function discoverAgentDefinitions(sessionCwd: string = process.cwd()): ListedAgentDefinition[] {
   const agents = new Map<string, ListedAgentDefinition>();
   const dirs: Array<{ path: string; source: AgentSource }> = [
     { path: getBundledAgentsDir(), source: "package" },
     { path: join(getAgentConfigDir(), "agents"), source: "global" },
-    { path: join(process.cwd(), ".pi", "agents"), source: "project" },
+    // Session cwd, not process.cwd() — see resolveSubagentPaths.
+    { path: join(sessionCwd, ".pi", "agents"), source: "project" },
   ];
 
   for (const { path: dir, source } of dirs) {
@@ -361,10 +362,14 @@ function discoverAgentDefinitions(): ListedAgentDefinition[] {
 function resolveSubagentPaths(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
+  sessionCwd: string = process.cwd(),
 ): { effectiveCwd: string | null; localAgentDir: string | null; effectiveAgentDir: string } {
   const rawCwd = params.cwd ?? agentDefs?.cwd ?? null;
   const cwdIsFromAgent = !params.cwd && agentDefs?.cwd != null;
-  const cwdBase = cwdIsFromAgent ? getAgentConfigDir() : process.cwd();
+  // Relative spawn cwds resolve against the session cwd, not process.cwd():
+  // a hosted pi process (e.g. under pi-web) runs with the host package dir as
+  // its process cwd, which is not where the user's project lives.
+  const cwdBase = cwdIsFromAgent ? getAgentConfigDir() : sessionCwd;
   const effectiveCwd = rawCwd ? (rawCwd.startsWith("/") ? rawCwd : join(cwdBase, rawCwd)) : null;
   const localAgentDir = effectiveCwd ? join(effectiveCwd, ".pi", "agent") : null;
   const effectiveAgentDir =
@@ -425,10 +430,14 @@ function resolveEffectiveInteractive(
   return !(agentDefs?.autoExit ?? false);
 }
 
-function loadAgentDefaults(agentName: string): AgentDefaults | null {
+function loadAgentDefaults(
+  agentName: string,
+  sessionCwd: string = process.cwd(),
+): AgentDefaults | null {
   const configDir = getAgentConfigDir();
   const paths = [
-    join(process.cwd(), ".pi", "agents", `${agentName}.md`),
+    // Session cwd, not process.cwd() — see resolveSubagentPaths.
+    join(sessionCwd, ".pi", "agents", `${agentName}.md`),
     join(configDir, "agents", `${agentName}.md`),
     join(getBundledAgentsDir(), `${agentName}.md`),
   ];
@@ -685,9 +694,9 @@ function selectSubagentSurfaceAnchor(): string | undefined {
  * from the parent, and later subagents split down from the existing right-hand
  * stack. Reserve the pane synchronously so concurrent launches use it.
  */
-function createSubagentSurface(name: string): string {
+function createSubagentSurface(name: string, cwd?: string): string {
   const anchor = selectSubagentSurfaceAnchor();
-  const surface = anchor ? createSurfaceSplit(name, "down", anchor) : createSurface(name);
+  const surface = anchor ? createSurfaceSplit(name, "down", anchor, cwd) : createSurface(name, cwd);
   launchingSubagentSurfaces.add(surface);
   return surface;
 }
@@ -1295,7 +1304,7 @@ async function launchSubagent(
   const startTime = Date.now();
   const id = Math.random().toString(16).slice(2, 10);
 
-  const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+  const agentDefs = params.agent ? loadAgentDefaults(params.agent, ctx.cwd) : null;
   const modelResolution = resolveSpawnModel({
     requestedModel: params.model,
     agentModel: agentDefs?.model,
@@ -1317,6 +1326,7 @@ async function launchSubagent(
   const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(
     params,
     agentDefs,
+    ctx.cwd,
   );
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
@@ -1338,7 +1348,7 @@ async function launchSubagent(
   // downward in that right-hand column. The reservation makes parallel tool
   // calls observe panes that are still in their shell-ready delay.
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSubagentSurface(params.name);
+  const surface = options?.surface ?? createSubagentSurface(params.name, ctx.cwd);
   if (!surfacePreCreated) {
     try {
       await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
@@ -1889,9 +1899,11 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       // top-level `fork: true` clone, which has no role and inherits the
       // caller's own already-trusted toolset. Without this guard a missing or
       // unknown `agent` silently launches an unrestricted, full-toolset child.
+      // ctx is optional in the tool-execute signature; validation-only paths
+      // may run without it (tests). Undefined falls back to process.cwd().
       const permittedAgents = SUBAGENT_ALLOWLIST
         ? [...SUBAGENT_ALLOWLIST]
-        : discoverAgentDefinitions().map((a) => a.name);
+        : discoverAgentDefinitions(ctx?.cwd).map((a) => a.name);
       const permittedSet = new Set(permittedAgents);
       const permittedList = permittedAgents.join(", ") || "(none)";
 
@@ -2135,7 +2147,9 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
     parameters: Type.Object({}),
 
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation);
+      const list = discoverAgentDefinitions(ctx.cwd).filter(
+        (agent) => !agent.disableModelInvocation,
+      );
 
       const modelMenu = formatModelMenu({
         sessionModel: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null,
@@ -2329,7 +2343,9 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       // transcript doesn't block the UI.
       const entryCountBefore = countSessionEntryLines(sessionPath);
 
-      const surface = createSubagentSurface(name);
+      // Resume in the subagent's original cwd: create the pane there so the
+      // pane cwd and the resumed command's `cd` (loadout.cwd) agree.
+      const surface = createSubagentSurface(name, loadout.cwd ?? ctx.cwd);
       try {
         await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
       } finally {
@@ -2522,7 +2538,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       const agentName = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
       const task = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
 
-      const defs = loadAgentDefaults(agentName);
+      const defs = loadAgentDefaults(agentName, ctx.cwd);
       if (!defs) {
         ctx.ui.notify(
           `Agent "${agentName}" not found in ~/.pi/agent/agents/ or .pi/agents/`,

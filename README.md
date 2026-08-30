@@ -214,6 +214,11 @@ subagent({ agent: "worker", cwd: "agents/sre", task: "Review the deployment pipe
 
 Set a per-agent default with `cwd:` in frontmatter.
 
+Relative `cwd` values resolve against the **parent session's working directory**
+(`ctx.cwd`), not the node process cwd — the two differ when pi runs hosted (e.g.
+under pi-web, where the process cwd is the host package directory). Absolute
+paths are used as-is.
+
 ## Status widget & configuration
 
 The widget tracks each sub-agent from a runtime activity snapshot written by the child: `starting`, `active` (turn/provider/tool work), `waiting` (open for input or another stage), `stalled` (no valid snapshot for too long), or `running` (fallback). Sub-agent sessions also show their own tools widget — toggle it with `Ctrl+Alt+O`. Completion messages expand with `Ctrl+O`.
@@ -243,7 +248,7 @@ herdr          # start or attach to the persistent session
 pi
 ```
 
-The first subagent pane is created with `herdr pane split --current --direction right --cwd "$PWD" --no-focus`. Additional concurrent panes target the newest subagent pane with `--direction down`, keeping the parent on the left and the subagent stack on the right without stealing focus.
+The first subagent pane is created with `herdr pane split --current --direction right --cwd <session-cwd> --no-focus` (the parent session's working directory, so a hosted pi process still lands the pane in the user's project). Additional concurrent panes target the newest subagent pane with `--direction down`, keeping the parent on the left and the subagent stack on the right without stealing focus.
 
 ## Development
 
