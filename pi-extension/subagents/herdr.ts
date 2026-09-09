@@ -24,8 +24,8 @@ const execFileAsync = promisify(execFile);
 // ── Availability ──
 
 export const HERDR_MIN_VERSION = "0.8.2";
-export const HERDR_TESTED_VERSION = "0.8.2";
-export const HERDR_REVIEW_VERSION = "0.9.0";
+export const HERDR_TESTED_VERSION = "0.9.0";
+export const HERDR_REVIEW_VERSION = "1.0.0";
 
 interface SemanticVersion {
   raw: string;
@@ -190,8 +190,9 @@ export function shellEscape(s: string): string {
 
 /**
  * Run `herdr` synchronously and return stdout. Server errors are JSON on
- * stdout with exit status 1, so a non-zero exit surfaces as an exception
- * carrying that JSON (callers use it to detect a destroyed pane).
+ * stderr with exit status 1; Node folds that stderr into the thrown error's
+ * `message`, so a non-zero exit still surfaces the JSON for callers that
+ * detect a destroyed pane via `isPaneGoneError`.
  */
 function herdr(args: string[]): string {
   return execFileSync("herdr", args, { encoding: "utf8" });
@@ -215,7 +216,11 @@ function parseCliJson(stdout: string): any {
 
 /** A herdr error mentioning a pane that no longer exists. */
 function isPaneGoneError(error: any): boolean {
-  const text = `${error?.message ?? ""} ${typeof error?.stdout === "string" ? error.stdout : ""}`;
+  const text = [
+    error?.message ?? "",
+    typeof error?.stdout === "string" ? error.stdout : "",
+    typeof error?.stderr === "string" ? error.stderr : "",
+  ].join(" ");
   return text.includes("pane_not_found");
 }
 

@@ -3339,7 +3339,7 @@ describe("subagent display helpers", () => {
 
 describe("herdr.ts", () => {
   describe("version compatibility", () => {
-    it("accepts the tested release and later 0.8 patches", () => {
+    it("accepts the minimum release through the tested 0.9 line", () => {
       assert.deepEqual(__herdrVersionTest__.classifyHerdrVersionOutput("herdr 0.8.2"), {
         kind: "supported",
         compatible: true,
@@ -3350,6 +3350,11 @@ describe("herdr.ts", () => {
         compatible: true,
         version: "0.8.99",
       });
+      assert.deepEqual(__herdrVersionTest__.classifyHerdrVersionOutput("herdr 0.9.0"), {
+        kind: "supported",
+        compatible: true,
+        version: "0.9.0",
+      });
     });
 
     it("rejects versions older than 0.8.2", () => {
@@ -3359,8 +3364,8 @@ describe("herdr.ts", () => {
       assert.match(status.message ?? "", />=0\.8\.2/);
     });
 
-    it("allows 0.9 and later with an untested warning", () => {
-      for (const output of ["herdr 0.9.0", "herdr 1.0.0-beta.1"]) {
+    it("allows 1.0 and later with an untested warning", () => {
+      for (const output of ["herdr 1.0.0", "herdr 1.0.0-beta.1"]) {
         const status = __herdrVersionTest__.classifyHerdrVersionOutput(output);
         assert.equal(status.kind, "untested");
         assert.equal(status.compatible, true);
