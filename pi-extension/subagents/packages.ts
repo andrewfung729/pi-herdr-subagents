@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 /**
  * Resolve the extension entry files of the pi packages a user has installed
@@ -198,6 +198,45 @@ function discoverExtensionsInDir(dir: string): string[] {
     }
   }
   return discovered;
+}
+
+/**
+ * Merge the extension paths re-loaded for whitelisted tools with the carried
+ * installed-package entries.
+ *
+ * Both sources can point into the same package: the tool-extension map
+ * hardcodes e.g. `<pkg>/index.ts` for pi-web-access, while that package's
+ * manifest declares `"extensions": ["./dist"]`. Emitting both `-e` paths loads
+ * the package twice, and the second registration of its tools is a fatal
+ * extension conflict that kills the child at startup ("Tool X conflicts with
+ * ..."). The manifest entry wins — it is exactly what a normal pi session
+ * loads for that package; the mapped file is only a fallback for packages that
+ * the manifest resolution missed (not installed, exotic source).
+ */
+export function mergeExtensionPaths(params: {
+  toolExtensionPaths: readonly string[];
+  packageExtensionPaths: readonly string[];
+}): string[] {
+  const packagePaths = [...new Set(params.packageExtensionPaths)];
+  const out = [...packagePaths];
+  for (const toolPath of params.toolExtensionPaths) {
+    if (packagePaths.some((pkgPath) => packageCoversToolPath(pkgPath, toolPath))) continue;
+    if (!out.includes(toolPath)) out.push(toolPath);
+  }
+  return out;
+}
+
+/**
+ * True when a package's manifest entry already loads the same package the
+ * tool-mapped file belongs to: either the identical path, or any entry inside
+ * the package root of an `index.ts`/`index.js` tool mapping.
+ */
+function packageCoversToolPath(packagePath: string, toolPath: string): boolean {
+  if (packagePath === toolPath) return true;
+  const base = basename(toolPath).toLowerCase();
+  if (base !== "index.ts" && base !== "index.js") return false;
+  const pkgRoot = dirname(toolPath);
+  return packagePath === pkgRoot || packagePath.startsWith(pkgRoot + sep);
 }
 
 /**

@@ -33,7 +33,7 @@ import {
   shellEscape,
 } from "./herdr.ts";
 import { formatModelMenu, resolveSpawnModel, type SessionModel } from "./models.ts";
-import { resolvePackageExtensions } from "./packages.ts";
+import { mergeExtensionPaths, resolvePackageExtensions } from "./packages.ts";
 import {
   countSessionEntryLines,
   findLastAssistantMessage,
@@ -954,10 +954,10 @@ function applySandboxToParts(
     parts.push("--no-extensions");
     parts.push("--tools", shellEscape(loadout.toolAllowlist));
 
-    const extPaths = new Set<string>();
+    const toolExtPaths: string[] = [];
     for (const tool of loadout.toolAllowlist.split(",")) {
       const extPath = getToolExtensionPath(tool);
-      if (extPath && existsSync(extPath)) extPaths.add(extPath);
+      if (extPath && existsSync(extPath)) toolExtPaths.push(extPath);
     }
 
     // Carry user/project-installed pi packages into the child. Provider-only
@@ -967,11 +967,17 @@ function applySandboxToParts(
     // --tools allowlist above.
     const agentDir = loadout.agentDir ?? getAgentConfigDir();
     const projectConfigDir = loadout.cwd ? join(loadout.cwd, ".pi") : null;
-    for (const pkgExtPath of resolvePackageExtensions({ agentDir, projectConfigDir }).paths) {
-      extPaths.add(pkgExtPath);
-    }
+    const packageExtPaths = resolvePackageExtensions({ agentDir, projectConfigDir }).paths;
 
-    for (const extPath of extPaths) {
+    // Merge, not concatenate: a tool-mapped `<pkg>/index.ts` plus the same
+    // package's manifest entry (pi-web-access ships ["./dist"]) loads the
+    // package twice, and the second registration of its tools is a fatal
+    // conflict at child startup. The manifest entry wins — it is exactly
+    // what a normal session loads for that package.
+    for (const extPath of mergeExtensionPaths({
+      toolExtensionPaths: toolExtPaths,
+      packageExtensionPaths: packageExtPaths,
+    })) {
       parts.push("-e", shellEscape(extPath));
     }
   }

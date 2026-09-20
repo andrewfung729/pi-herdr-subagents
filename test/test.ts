@@ -22,6 +22,7 @@ import {
   splitThinkingSuffix,
 } from "../pi-extension/subagents/models.ts";
 import {
+  mergeExtensionPaths,
   resolvePackageEntryPaths,
   resolvePackageExtensions,
 } from "../pi-extension/subagents/packages.ts";
@@ -3567,5 +3568,71 @@ describe("packages.ts installed-package resolution", () => {
     });
 
     assert.deepEqual(resolvePackageEntryPaths(pkgDir), [join(pkgDir, "real.ts")]);
+  });
+
+  describe("mergeExtensionPaths", () => {
+    it("drops the tool-mapped index file when the package manifest covers the same package", () => {
+      // The pi-web-access regression shape: the tool-extension map hardcodes
+      // <pkg>/index.ts while the manifest ships ["./dist"] — emitting both
+      // -e paths loads the package twice and the second registration of its
+      // tools is a fatal extension conflict at child startup.
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: ["/agent/npm/node_modules/pi-web-access/index.ts"],
+        packageExtensionPaths: ["/agent/npm/node_modules/pi-web-access/dist"],
+      });
+      assert.deepEqual(merged, ["/agent/npm/node_modules/pi-web-access/dist"]);
+    });
+
+    it("keeps the tool path when no package entry covers its package", () => {
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: ["/agent/extensions/web-search/index.ts"],
+        packageExtensionPaths: ["/agent/npm/node_modules/other-pkg/dist"],
+      });
+      assert.deepEqual(merged, [
+        "/agent/npm/node_modules/other-pkg/dist",
+        "/agent/extensions/web-search/index.ts",
+      ]);
+    });
+
+    it("deduplicates identical paths between the tool map and the manifest", () => {
+      const p = "/agent/npm/node_modules/rpiv/index.ts";
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: [p],
+        packageExtensionPaths: [p],
+      });
+      assert.deepEqual(merged, [p]);
+    });
+
+    it("does not let a similarly named sibling package shadow the tool path", () => {
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: ["/agent/npm/node_modules/pi-web-access/index.ts"],
+        packageExtensionPaths: ["/agent/npm/node_modules/pi-web-access-fork/dist"],
+      });
+      assert.deepEqual(merged, [
+        "/agent/npm/node_modules/pi-web-access-fork/dist",
+        "/agent/npm/node_modules/pi-web-access/index.ts",
+      ]);
+    });
+
+    it("prefers a manifest file entry nested inside the package over the root index", () => {
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: ["/agent/git/host/org/repo/index.ts"],
+        packageExtensionPaths: ["/agent/git/host/org/repo/src/main.ts"],
+      });
+      assert.deepEqual(merged, ["/agent/git/host/org/repo/src/main.ts"]);
+    });
+
+    it("keeps non-index tool-mapped files even inside a covered package", () => {
+      // Only index.ts/index.js mappings yield to the manifest entry; any other
+      // tool-mapped file is treated as its own extension and kept.
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: ["/agent/npm/node_modules/duo/bespoke.ts"],
+        packageExtensionPaths: ["/agent/npm/node_modules/duo/dist"],
+      });
+      assert.deepEqual(merged, [
+        "/agent/npm/node_modules/duo/dist",
+        "/agent/npm/node_modules/duo/bespoke.ts",
+      ]);
+    });
   });
 });
