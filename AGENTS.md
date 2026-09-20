@@ -38,6 +38,8 @@ pi-extension/subagents/
   herdr.ts           # surface layer: thin wrapper over `herdr pane split|run|read|close` CLI.
                      # Same API the tmux version had (create/split, send, read, poll-for-exit)
   session.ts         # child pi process launch: --no-extensions --tools <allowlist>, loadout snapshot
+  packages.ts        # resolves installed pi packages' extension entries so restricted children keep
+                     # provider-registering packages (e.g. custom model providers) loaded
   activity.ts        # runtime activity snapshot files the child writes; parent polls for widget status
   status.ts          # status widget UI
   subagent-done.ts   # completion sidecars, fatal-startup-stall escalation

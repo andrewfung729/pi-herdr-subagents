@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -21,6 +21,10 @@ import {
   resolveSpawnModel,
   splitThinkingSuffix,
 } from "../pi-extension/subagents/models.ts";
+import {
+  resolvePackageEntryPaths,
+  resolvePackageExtensions,
+} from "../pi-extension/subagents/packages.ts";
 import {
   appendBranchSummary,
   copySessionFile,
@@ -3402,5 +3406,166 @@ describe("herdr.ts", () => {
       // Inside single quotes, everything is literal
       assert.ok(escaped.includes("$world"));
     });
+  });
+});
+
+describe("packages.ts installed-package resolution", () => {
+  let agentDir: string;
+
+  beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), "pi-subagents-packages-"));
+    mkdirSync(join(agentDir, "npm", "node_modules"), { recursive: true });
+    mkdirSync(join(agentDir, "git"), { recursive: true });
+  });
+
+  after(() => {
+    rmSync(join(tmpdir(), "pi-subagents-packages-"), { recursive: true, force: true });
+  });
+
+  function writeSettings(configDir: string, packages: unknown) {
+    writeFileSync(join(configDir, "settings.json"), JSON.stringify({ packages }), "utf8");
+  }
+
+  function writePackage(packageDir: string, files: Record<string, string>) {
+    for (const [name, content] of Object.entries(files)) {
+      const p = join(packageDir, name);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, content, "utf8");
+    }
+  }
+
+  it("resolves a manifest-based npm package", () => {
+    const pkgDir = join(agentDir, "npm", "node_modules", "my-provider");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {};",
+    });
+    writeSettings(agentDir, ["npm:my-provider"]);
+
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths, [join(pkgDir, "index.ts")]);
+    assert.deepEqual(unresolved, []);
+  });
+
+  it("resolves scoped npm package names with version ranges", () => {
+    const pkgDir = join(agentDir, "npm", "node_modules", "@scope", "pkg");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {};",
+    });
+    writeSettings(agentDir, ["npm:@scope/pkg@^1.2.0"]);
+
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths, [join(pkgDir, "index.ts")]);
+    assert.deepEqual(unresolved, []);
+  });
+
+  it("resolves git shorthand, URL, and ref forms to the same install dir", () => {
+    const pkgDir = join(agentDir, "git", "github.com", "org", "repo");
+    writePackage(pkgDir, { "index.ts": "export default function () {};" });
+    writeSettings(agentDir, [
+      "git:github.com/org/repo",
+      "git:https://github.com/org/repo.git#v1.0",
+      "https://github.com/org/repo",
+    ]);
+
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths, [join(pkgDir, "index.ts")]);
+    assert.deepEqual(unresolved, []);
+  });
+
+  it("auto-discovers extensions/ dirs when no manifest entries exist", () => {
+    const pkgDir = join(agentDir, "npm", "node_modules", "auto-pkg");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({ name: "auto-pkg" }),
+      "extensions/direct.ts": "export default function () {};",
+      "extensions/sub/index.js": "export default function () {};",
+    });
+    writeSettings(agentDir, ["npm:auto-pkg"]);
+
+    const { paths } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths.sort(), [
+      join(pkgDir, "extensions", "direct.ts"),
+      join(pkgDir, "extensions", "sub", "index.js"),
+    ]);
+  });
+
+  it("resolves local-path sources against the agent dir", () => {
+    const pkgDir = join(agentDir, "local-ext");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./main.ts"] } }),
+      "main.ts": "export default function () {};",
+    });
+    writeSettings(agentDir, ["./local-ext"]);
+
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths, [join(pkgDir, "main.ts")]);
+    assert.deepEqual(unresolved, []);
+  });
+
+  it("carries project-scope packages from the project config dir", () => {
+    const projectDir = join(agentDir, "project");
+    const projectConfigDir = join(projectDir, ".pi");
+    const pkgDir = join(projectConfigDir, "npm", "node_modules", "proj-pkg");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {};",
+    });
+    writeSettings(projectConfigDir, ["npm:proj-pkg"]);
+
+    const { paths } = resolvePackageExtensions({ agentDir, projectConfigDir });
+    assert.deepEqual(paths, [join(pkgDir, "index.ts")]);
+  });
+
+  it("reports missing installs as unresolved without throwing", () => {
+    writeSettings(agentDir, [
+      "npm:not-installed",
+      "git:github.com/org/missing",
+      "git:not-a-valid-source",
+      "npm:",
+    ]);
+
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths, []);
+    assert.deepEqual(unresolved.sort(), [
+      "git:github.com/org/missing",
+      "git:not-a-valid-source",
+      "npm:",
+      "npm:not-installed",
+    ]);
+  });
+
+  it("returns empty results when settings.json is absent", () => {
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir });
+    assert.deepEqual(paths, []);
+    assert.deepEqual(unresolved, []);
+  });
+
+  it("deduplicates entries shared between global and project settings", () => {
+    const pkgDir = join(agentDir, "npm", "node_modules", "shared-pkg");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {};",
+    });
+    writeSettings(agentDir, ["npm:shared-pkg"]);
+    const projectConfigDir = join(agentDir, "project", ".pi");
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeSettings(projectConfigDir, ["npm:shared-pkg"]);
+
+    const { paths } = resolvePackageExtensions({ agentDir, projectConfigDir });
+    assert.deepEqual(paths, [join(pkgDir, "index.ts")]);
+  });
+
+  it("resolvePackageEntryPaths prefers manifest entries and skips missing files", () => {
+    const pkgDir = join(agentDir, "entry-order");
+    writePackage(pkgDir, {
+      "package.json": JSON.stringify({
+        pi: { extensions: ["./gone.ts", "./real.ts"] },
+      }),
+      "index.ts": "export default function () {};",
+      "real.ts": "export default function () {};",
+    });
+
+    assert.deepEqual(resolvePackageEntryPaths(pkgDir), [join(pkgDir, "real.ts")]);
   });
 });

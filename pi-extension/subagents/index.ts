@@ -33,6 +33,7 @@ import {
   shellEscape,
 } from "./herdr.ts";
 import { formatModelMenu, resolveSpawnModel, type SessionModel } from "./models.ts";
+import { resolvePackageExtensions } from "./packages.ts";
 import {
   countSessionEntryLines,
   findLastAssistantMessage,
@@ -958,6 +959,18 @@ function applySandboxToParts(
       const extPath = getToolExtensionPath(tool);
       if (extPath && existsSync(extPath)) extPaths.add(extPath);
     }
+
+    // Carry user/project-installed pi packages into the child. Provider-only
+    // packages (e.g. pi-commandcode-provider) back no tools, so without this a
+    // subagent pinned to one of their models dies at startup with "Model not
+    // found". Packages are user-trusted and their tools stay gated by the
+    // --tools allowlist above.
+    const agentDir = loadout.agentDir ?? getAgentConfigDir();
+    const projectConfigDir = loadout.cwd ? join(loadout.cwd, ".pi") : null;
+    for (const pkgExtPath of resolvePackageExtensions({ agentDir, projectConfigDir }).paths) {
+      extPaths.add(pkgExtPath);
+    }
+
     for (const extPath of extPaths) {
       parts.push("-e", shellEscape(extPath));
     }
