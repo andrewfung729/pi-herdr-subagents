@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Resolve the extension entry files of the pi packages a user has installed
@@ -43,6 +43,12 @@ interface SettingsLike {
   packages?: Array<string | { source?: unknown }>;
 }
 
+interface SettingsPackageEntry {
+  source: string;
+  /** Raw settings `autoload` flag (object-form entries only). */
+  autoload: boolean | undefined;
+}
+
 function readSettings(configDir: string): SettingsLike | null {
   const p = join(configDir, "settings.json");
   if (!existsSync(p)) return null;
@@ -54,17 +60,22 @@ function readSettings(configDir: string): SettingsLike | null {
   }
 }
 
-function settingsSources(settings: SettingsLike | null): string[] {
-  const out: string[] = [];
+function settingsSources(settings: SettingsLike | null): SettingsPackageEntry[] {
+  const out: SettingsPackageEntry[] = [];
   for (const entry of settings?.packages ?? []) {
-    if (typeof entry === "string" && entry.trim()) out.push(entry.trim());
-    else if (
+    if (typeof entry === "string" && entry.trim()) {
+      out.push({ source: entry.trim(), autoload: undefined });
+    } else if (
       entry &&
       typeof entry === "object" &&
       typeof entry.source === "string" &&
       entry.source.trim()
-    )
-      out.push(entry.source.trim());
+    ) {
+      out.push({
+        source: entry.source.trim(),
+        autoload: (entry as { autoload?: unknown }).autoload === false ? false : undefined,
+      });
+    }
   }
   return out;
 }
@@ -204,23 +215,39 @@ function discoverExtensionsInDir(dir: string): string[] {
  * Merge the extension paths re-loaded for whitelisted tools with the carried
  * installed-package entries.
  *
- * Both sources can point into the same package: the tool-extension map
- * hardcodes e.g. `<pkg>/index.ts` for pi-web-access, while that package's
- * manifest declares `"extensions": ["./dist"]`. Emitting both `-e` paths loads
- * the package twice, and the second registration of its tools is a fatal
- * extension conflict that kills the child at startup ("Tool X conflicts with
- * ..."). The manifest entry wins — it is exactly what a normal pi session
- * loads for that package; the mapped file is only a fallback for packages that
- * the manifest resolution missed (not installed, exotic source).
+ * Both sources can point into the same package:
+ *
+ * - the tool-extension map hardcodes e.g. `<pkg>/index.ts` for pi-web-access,
+ *   while that package's manifest declares `["./dist"]`;
+ * - the tool map always points at the GLOBAL install, while the carried
+ *   entries may be the PROJECT install of the same package (pi: project wins
+ *   for the same package identity).
+ *
+ * Emitting both `-e` paths loads the package twice, and the second
+ * registration of its tools is a fatal extension conflict that kills the child
+ * at startup ("Tool X conflicts with ..."). A tool-mapped path is therefore
+ * dropped when the carried entries already load that package — matched either
+ * by directory containment (manifest entry under the mapped file's package
+ * root) or by package identity (`identityForInstalledPath`).
  */
 export function mergeExtensionPaths(params: {
   toolExtensionPaths: readonly string[];
   packageExtensionPaths: readonly string[];
+  /** Config dirs used to reverse-map carried/tool paths to package identities. */
+  configDirs?: readonly string[];
 }): string[] {
   const packagePaths = [...new Set(params.packageExtensionPaths)];
+  const configDirs = params.configDirs ?? [];
+  const carriedIdentities = new Set(
+    packagePaths
+      .map((p) => identityForInstalledPath(p, configDirs))
+      .filter((v): v is string => v !== null),
+  );
   const out = [...packagePaths];
   for (const toolPath of params.toolExtensionPaths) {
     if (packagePaths.some((pkgPath) => packageCoversToolPath(pkgPath, toolPath))) continue;
+    const identity = identityForInstalledPath(toolPath, configDirs);
+    if (identity !== null && carriedIdentities.has(identity)) continue;
     if (!out.includes(toolPath)) out.push(toolPath);
   }
   return out;
@@ -240,9 +267,82 @@ function packageCoversToolPath(packagePath: string, toolPath: string): boolean {
 }
 
 /**
+ * Reverse-map an on-disk path to a package identity when it lives inside a
+ * config dir's npm or git install tree (`npm:<name>` / `git:<host>/<path>`).
+ * Returns null for anything else (legacy extension dirs, unrelated paths,
+ * local-path packages) — those have no scope-independent identity.
+ */
+function identityForInstalledPath(path: string, configDirs: readonly string[]): string | null {
+  for (const configDir of configDirs) {
+    const rel = relative(configDir, path);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
+    const segs = rel.split(sep);
+    if (segs[0] === "npm" && segs[1] === "node_modules" && segs[2]) {
+      if (segs[2].startsWith("@")) {
+        if (segs[3]) return `npm:${segs[2]}/${segs[3]}`;
+        continue; // "@scope" with no package segment — not a package root
+      }
+      return `npm:${segs[2]}`;
+    }
+    if (segs[0] === "git" && segs[1] && segs[2] && segs[3]) {
+      return `git:${segs[1]}/${segs[2]}/${segs[3]}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The identity a settings source resolves to, mirroring pi's
+ * getPackageIdentity: npm keeps only the package name (versions are not part
+ * of identity), git keeps host/path (SSH and HTTPS are the same package), and
+ * local paths are resolved against the scope base dir.
+ */
+function identityForSource(source: string, baseDir: string): string {
+  const npmName = parseNpmName(source);
+  if (npmName) return `npm:${npmName}`;
+  const gitRel = parseGitSourcePath(source);
+  if (gitRel) return `git:${gitRel}`;
+  return `local:${resolve(baseDir, source)}`;
+}
+
+/** Resolve one settings entry to extension entry paths for its scope. */
+function resolveScopeEntry(entry: { source: string; configDir: string; baseDir: string }): {
+  paths: string[];
+  missing: boolean;
+} {
+  const { source, configDir, baseDir } = entry;
+  let packageDir: string | null = null;
+
+  const npmName = parseNpmName(source);
+  if (npmName) {
+    packageDir = join(configDir, "npm", "node_modules", ...npmName.split("/"));
+  } else if (
+    source.startsWith("git:") ||
+    source.startsWith("git+") ||
+    /^([a-z]+:)?\/\/|^git@/i.test(source)
+  ) {
+    const gitRel = parseGitSourcePath(source);
+    if (gitRel) packageDir = join(configDir, "git", ...gitRel.split("/"));
+  } else if (isLocalPathSource(source)) {
+    packageDir = resolve(baseDir, source);
+  }
+
+  if (!packageDir || !existsSync(packageDir)) return { paths: [], missing: true };
+  return { paths: resolvePackageEntryPaths(packageDir), missing: false };
+}
+
+/**
  * Resolve every installed package's extension entry files for the given
- * scopes. User-scope packages live under `agentDir` (`npm/node_modules/...`,
- * `git/...`, or paths relative to `agentDir`); project-scope packages under
+ * scopes, deduplicating across scopes by package identity the way pi does
+ * (dedupePackages): for the same identity the PROJECT install wins and the
+ * global one is dropped — loading both would register the same tools twice,
+ * which is a fatal extension conflict in the child. A winning scope with no
+ * on-disk install falls back to the other scope (we never install). Entries
+ * with `autoload: false` are install-not-load deltas over another scope's
+ * entry and contribute nothing (mirroring what a normal session loads).
+ *
+ * User-scope packages live under `agentDir` (`npm/node_modules/...`, `git/...`,
+ * or paths relative to `agentDir`); project-scope packages under
  * `projectConfigDir` the same way. Unresolvable or not-installed sources are
  * reported in `unresolved` and never throw — spawning must not break because a
  * package is missing or uses an exotic source format.
@@ -251,62 +351,70 @@ export function resolvePackageExtensions(
   opts: ResolvePackageExtensionsOptions,
 ): ResolvedPackageExtensions {
   const unresolved: string[] = [];
-  const paths = new Set<string>();
 
-  const scopes: Array<{ configDir: string; baseDir: string }> = [
-    { configDir: opts.agentDir, baseDir: opts.agentDir },
-  ];
+  // Project first, mirroring pi's dedupePackages order (project wins).
+  const scopeEntries: Array<{
+    source: string;
+    scope: "project" | "user";
+    configDir: string;
+    baseDir: string;
+  }> = [];
+  const pushEntries = (
+    settings: SettingsLike | null,
+    scope: "project" | "user",
+    configDir: string,
+  ) => {
+    for (const e of settingsSources(settings)) {
+      // `autoload: false` marks an install that must not load (a delta over
+      // another scope's entry) — it contributes no extension paths.
+      if (e.autoload === false) continue;
+      scopeEntries.push({ source: e.source, scope, configDir, baseDir: configDir });
+    }
+  };
   if (opts.projectConfigDir && opts.projectConfigDir !== opts.agentDir) {
-    scopes.push({ configDir: opts.projectConfigDir, baseDir: opts.projectConfigDir });
+    pushEntries(readSettings(opts.projectConfigDir), "project", opts.projectConfigDir);
+  }
+  pushEntries(readSettings(opts.agentDir), "user", opts.agentDir);
+
+  // Resolve every entry, bucketed by package identity.
+  const buckets = new Map<
+    string,
+    Array<{
+      source: string;
+      scope: "project" | "user";
+      paths: string[];
+      missing: boolean;
+    }>
+  >();
+  for (const e of scopeEntries) {
+    const identity = identityForSource(e.source, e.baseDir);
+    let bucket = buckets.get(identity);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(identity, bucket);
+    }
+    const { paths: entryPaths, missing } = resolveScopeEntry(e);
+    bucket.push({ source: e.source, scope: e.scope, paths: entryPaths, missing });
   }
 
-  for (const scope of scopes) {
-    const settings = readSettings(scope.configDir);
-    for (const source of settingsSources(settings)) {
-      // npm:name / npm:name@range
-      const npmName = parseNpmName(source);
-      if (npmName) {
-        const packageDir = join(scope.configDir, "npm", "node_modules", ...npmName.split("/"));
-        if (existsSync(packageDir)) {
-          for (const p of resolvePackageEntryPaths(packageDir)) paths.add(p);
-        } else {
-          unresolved.push(source);
-        }
-        continue;
+  // Pick each identity's representative: the project install when it is on
+  // disk, else the global install (we never install, so a missing winner must
+  // not lose the package). A project `autoload: false` delta keeps both.
+  const paths = new Set<string>();
+  for (const bucket of buckets.values()) {
+    const before = paths.size;
+    const project = bucket.find((r) => r.scope === "project");
+    const user = bucket.find((r) => r.scope === "user");
+    if (project && !project.missing) {
+      for (const p of project.paths) paths.add(p);
+    } else if (user && !user.missing) {
+      for (const p of user.paths) paths.add(p);
+    }
+    if (paths.size === before) {
+      // Nothing on disk for this identity — report the sources as unresolved.
+      for (const r of bucket) {
+        if (r.missing) unresolved.push(r.source);
       }
-
-      // git sources → gitRoot/<host>/<path>
-      if (
-        source.startsWith("git:") ||
-        source.startsWith("git+") ||
-        /^([a-z]+:)?\/\/|^git@/i.test(source)
-      ) {
-        const gitRel = parseGitSourcePath(source);
-        if (gitRel) {
-          const packageDir = join(scope.configDir, "git", ...gitRel.split("/"));
-          if (existsSync(packageDir)) {
-            for (const p of resolvePackageEntryPaths(packageDir)) paths.add(p);
-          } else {
-            unresolved.push(source);
-          }
-        } else {
-          unresolved.push(source);
-        }
-        continue;
-      }
-
-      // Local path sources, resolved against the scope base dir.
-      if (isLocalPathSource(source)) {
-        const packageDir = resolve(scope.baseDir, source);
-        if (existsSync(packageDir)) {
-          for (const p of resolvePackageEntryPaths(packageDir)) paths.add(p);
-        } else {
-          unresolved.push(source);
-        }
-        continue;
-      }
-
-      unresolved.push(source);
     }
   }
 

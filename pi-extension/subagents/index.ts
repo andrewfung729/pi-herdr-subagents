@@ -969,14 +969,15 @@ function applySandboxToParts(
     const projectConfigDir = loadout.cwd ? join(loadout.cwd, ".pi") : null;
     const packageExtPaths = resolvePackageExtensions({ agentDir, projectConfigDir }).paths;
 
-    // Merge, not concatenate: a tool-mapped `<pkg>/index.ts` plus the same
-    // package's manifest entry (pi-web-access ships ["./dist"]) loads the
-    // package twice, and the second registration of its tools is a fatal
-    // conflict at child startup. The manifest entry wins — it is exactly
-    // what a normal session loads for that package.
+    // Merge, not concatenate: the tool map and the carried packages can point
+    // into the same package (manifest entry vs hardcoded file, or the global
+    // install vs the winning project install of the same package). Loading a
+    // package twice registers its tools twice — a fatal conflict at child
+    // startup. Package entries win; the tool map fills the gaps.
     for (const extPath of mergeExtensionPaths({
       toolExtensionPaths: toolExtPaths,
       packageExtensionPaths: packageExtPaths,
+      configDirs: projectConfigDir ? [agentDir, projectConfigDir] : [agentDir],
     })) {
       parts.push("-e", shellEscape(extPath));
     }

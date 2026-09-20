@@ -3553,8 +3553,69 @@ describe("packages.ts installed-package resolution", () => {
     mkdirSync(projectConfigDir, { recursive: true });
     writeSettings(projectConfigDir, ["npm:shared-pkg"]);
 
+    // The project install is absent on disk, so the global one is all we have.
     const { paths } = resolvePackageExtensions({ agentDir, projectConfigDir });
     assert.deepEqual(paths, [join(pkgDir, "index.ts")]);
+  });
+
+  it("project install wins over the global install of the same package", () => {
+    // The wksync-my-learning failure: @juicesharp/rpiv-ask-user-question
+    // installed in both scopes — loading both registers ask_user_question
+    // twice, a fatal extension conflict at child startup.
+    const globalDir = join(agentDir, "npm", "node_modules", "@juicesharp", "rpiv");
+    const projectConfigDir = join(agentDir, "project", ".pi");
+    const projectDir = join(projectConfigDir, "npm", "node_modules", "@juicesharp", "rpiv");
+    writePackage(globalDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {}; // global",
+    });
+    writePackage(projectDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {}; // project",
+    });
+    writeSettings(agentDir, ["npm:@juicesharp/rpiv"]);
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeSettings(projectConfigDir, ["npm:@juicesharp/rpiv"]);
+
+    const { paths } = resolvePackageExtensions({ agentDir, projectConfigDir });
+    assert.deepEqual(paths, [join(projectDir, "index.ts")]);
+  });
+
+  it("falls back to the global install when the winning project entry is not installed", () => {
+    const globalDir = join(agentDir, "npm", "node_modules", "global-only");
+    writePackage(globalDir, {
+      "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+      "index.ts": "export default function () {};",
+    });
+    writeSettings(agentDir, ["npm:global-only"]);
+    const projectConfigDir = join(agentDir, "project", ".pi");
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeSettings(projectConfigDir, ["npm:global-only"]);
+
+    const { paths, unresolved } = resolvePackageExtensions({ agentDir, projectConfigDir });
+    assert.deepEqual(paths, [join(globalDir, "index.ts")]);
+    assert.deepEqual(unresolved, []);
+  });
+
+  it("a project autoload:false entry loads nothing; the global entry stands in", () => {
+    // The wksync-my-learning shape: the project pins the package with
+    // autoload:false (+ an extensions delta) while the global install is the
+    // one a normal session actually loads. Carrying both would double-load it.
+    const globalDir = join(agentDir, "npm", "node_modules", "delta-pkg");
+    const projectConfigDir = join(agentDir, "project", ".pi");
+    const projectDir = join(projectConfigDir, "npm", "node_modules", "delta-pkg");
+    for (const dir of [globalDir, projectDir]) {
+      writePackage(dir, {
+        "package.json": JSON.stringify({ pi: { extensions: ["./index.ts"] } }),
+        "index.ts": "export default function () {};",
+      });
+    }
+    writeSettings(agentDir, ["npm:delta-pkg"]);
+    mkdirSync(projectConfigDir, { recursive: true });
+    writeSettings(projectConfigDir, [{ source: "npm:delta-pkg", autoload: false }]);
+
+    const { paths } = resolvePackageExtensions({ agentDir, projectConfigDir });
+    assert.deepEqual(paths, [join(globalDir, "index.ts")]);
   });
 
   it("resolvePackageEntryPaths prefers manifest entries and skips missing files", () => {
@@ -3612,6 +3673,18 @@ describe("packages.ts installed-package resolution", () => {
         "/agent/npm/node_modules/pi-web-access-fork/dist",
         "/agent/npm/node_modules/pi-web-access/index.ts",
       ]);
+    });
+
+    it("drops a tool path that duplicates the carried install of another scope", () => {
+      // The tool map hardcodes the GLOBAL npm path; the carried entries hold
+      // the PROJECT install of the same package (identity npm:name). Only the
+      // project copy may load.
+      const merged = mergeExtensionPaths({
+        toolExtensionPaths: ["/agent/npm/node_modules/@juicesharp/rpiv/index.ts"],
+        packageExtensionPaths: ["/agent/project/.pi/npm/node_modules/@juicesharp/rpiv/index.ts"],
+        configDirs: ["/agent", "/agent/project/.pi"],
+      });
+      assert.deepEqual(merged, ["/agent/project/.pi/npm/node_modules/@juicesharp/rpiv/index.ts"]);
     });
 
     it("prefers a manifest file entry nested inside the package over the root index", () => {
