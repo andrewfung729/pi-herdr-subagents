@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Fast codebase recon — explores files, finds patterns, maps architecture
-tools: read, grep, find, ls
+tools: read, grep, find, ls, codemode
 thinking: low
 system-prompt: append
 auto-exit: true
@@ -17,8 +17,8 @@ Thoroughness (infer from task, default medium):
 - Thorough: Trace all dependencies, check tests/types
 
 Strategy:
-1. grep/find to locate relevant code
-2. Read key sections (not entire files)
+1. Prefer `codemode` for parallel gather and distillation (grep/find/read in one script; return only the map)
+2. Use direct grep/find/read for single targeted lookups
 3. Identify types, interfaces, key functions
 4. Note dependencies between files
 

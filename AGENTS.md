@@ -10,7 +10,7 @@ Fork chain: [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interac
 - **One parent wake per batch:** completions stream in individually; the parent turn triggers once per autonomous batch.
 - **Failures surface, never hang:** fatal startup stalls escalate after 60 s (read pane → synthesize `.exit` → deliver failure result); vanished panes error out; explicit spawn names reserved synchronously.
 - **pi-only execution:** every sub-agent is a pi process; bundled agents run on the spawning session's current model; web tools via pi-web-access (`fetch_content`, `source_check`, `get_search_content`); shell is plain `bash`; role folders use `AGENTS.md`.
-- **Dev infra:** pnpm, Biome + tsgo (`pnpm check`), husky pre-commit, three-tier test suite.
+- **Dev infra:** pnpm, Biome + tsgo (`pnpm check`), husky pre-commit, three-tier test suite. Peer floor `pi >= 0.99` (codemode builtin + tool `exposure`).
 
 Upstream repos document a different system (tmux surface, different tool names and models, other CLI backends). Read their issues and PRs for history, but trust this repo's docs and code for behavior.
 
@@ -58,9 +58,23 @@ test/
 - **ESM with explicit `.ts` import extensions** (`rewriteRelativeImportExtensions`), `strict` + `erasableSyntaxOnly` — no enums, no parameter properties; use plain types/objects. Target ES2022, Node16 resolution.
 - **Biome only covers `pi-extension/**` and `test/**`** (see `biome.json` `files.includes`). Keep scripts/ clean anyway; 2-space indent, width 100.
 - **herdr surface quirks:** screen reads use the `recent-unwrapped` snapshot with a 200-row window tail-sliced in JS (small `--lines` values truncate); pane ids are workspace-qualified (`w1:p3`), never tmux `%N`; panes are created `--no-focus`. Tested with herdr 0.9.0; >=1.0.0 is untested — compatibility is gated by version.
-- **Tool access is whitelist-only.** Children launch with `--no-extensions --tools <allowlist>`; only extensions backing listed tools are re-loaded. Spawning depth is enforced via `PI_SUBAGENT_ALLOWED`. Don't weaken this.
+- **Tool access is whitelist-only.** Children launch with `--no-extensions --tools <allowlist>`; only extensions backing listed tools are re-loaded. Spawning depth is enforced via `PI_SUBAGENT_ALLOWED`. Don't weaken this. `codemode` is a pi builtin extension id (`-e builtin:codemode`) wired from the allowlist token — not a filesystem path from `getToolExtensionPath` and not package carry. Orchestration/ask tools this package registers (`subagent`, `subagent_message`, `subagents_list`, `ask_question`) stay `exposure: "model-only"` so codemode scripts cannot call them.
 - **Bundled agents omit `model`** so they run on the spawning session's current model. `subagents_list` exposes the session's scoped models, and spawn-time `model` parameters are validated against them (invalid ids fall back with a warning). `subagent_agents` frontmatter both grants and restricts the spawning toolset.
 - **Docs are the spec:** `README.md` describes observable behavior in detail (resume, loadout snapshots, auto-exit, fatal-stall escalation). If you change behavior, update README in the same change.
 - **config.json is gitignored** (copy from `config.json.example`); the `.memory/` dir is also ignored.
 - Tests use `node --test` with type-stripped TS — no test framework deps. Integration tests run `--test-concurrency=1` because they share one herdr workspace.
 - Commit subjects: short capitalized imperative ("Escalate fatal startup stalls instead of waiting forever").
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature-slug>/` in this repo. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, used verbatim (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.

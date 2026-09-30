@@ -954,8 +954,13 @@ function applySandboxToParts(
     parts.push("--no-extensions");
     parts.push("--tools", shellEscape(loadout.toolAllowlist));
 
+    const allowlistTools = loadout.toolAllowlist
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
     const toolExtPaths: string[] = [];
-    for (const tool of loadout.toolAllowlist.split(",")) {
+    for (const tool of allowlistTools) {
       const extPath = getToolExtensionPath(tool);
       if (extPath && existsSync(extPath)) toolExtPaths.push(extPath);
     }
@@ -980,6 +985,13 @@ function applySandboxToParts(
       configDirs: projectConfigDir ? [agentDir, projectConfigDir] : [agentDir],
     })) {
       parts.push("-e", shellEscape(extPath));
+    }
+
+    // codemode is a pi builtin extension id, not a filesystem path. Naming it
+    // in the allowlist must re-enable `-e builtin:codemode` after
+    // `--no-extensions` (once; duplicate allowlist entries stay idempotent).
+    if (allowlistTools.includes("codemode")) {
+      parts.push("-e", shellEscape("builtin:codemode"));
     }
   }
 }
@@ -1881,6 +1893,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
+    exposure: "model-only",
     description:
       "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
       "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
@@ -2157,6 +2170,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
   pi.registerTool({
     name: "subagents_list",
     label: "List Subagents",
+    exposure: "model-only",
     description:
       "List all available subagent definitions plus the models usable by the subagent tool. " +
       "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
@@ -2220,6 +2234,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
   pi.registerTool({
     name: "subagent_message",
     label: "Message Subagent",
+    exposure: "model-only",
     description:
       "Send a message to a subagent by name. Names are unique within your session and persist after a subagent finishes, " +
       "so the SAME name works whether the subagent is running or finished: if it is still running, your message steers its live session; " +

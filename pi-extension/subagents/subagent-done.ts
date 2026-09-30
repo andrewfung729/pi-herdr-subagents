@@ -332,6 +332,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "ask_question",
     label: "ask_question",
+    exposure: "model-only",
     description:
       "Ask the orchestrator (the parent agent that spawned you) a single question and pause until they reply. " +
       "Use this when requirements are ambiguous, a decision would materially affect your work, you're blocked, " +

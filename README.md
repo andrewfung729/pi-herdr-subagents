@@ -70,10 +70,11 @@ The extension registers its tools and `/subagent` command only when Pi starts in
 
 | Tool | Description |
 | --- | --- |
-| `subagent` | Spawn a sub-agent in a dedicated herdr pane (async) |
-| `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished |
-| `subagents_list` | List available agent definitions |
-| `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
+| `subagent` | Spawn a sub-agent in a dedicated herdr pane (async). Model-only — not callable from codemode scripts |
+| `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished. Model-only |
+| `subagents_list` | List available agent definitions. Model-only |
+| `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply. Model-only |
+| `codemode` | *(in children when allowlisted)* Pi's built-in QuickJS sandbox for parallel tool calls; see [Codemode](#codemode) |
 
 There is also a `/subagent <agent> <task>` command for spawning directly.
 
@@ -117,9 +118,9 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 
 | Agent | Model | Tools | Role |
 | ----- | ----- | ----- | ---- |
-| **scout** | session model | `read`, `grep`, `find`, `ls` | Fast read-only codebase recon |
-| **researcher** | session model | `web_search`, `fetch_content` | Web research, synthesized into a sourced brief |
-| **worker** | session model | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content` + spawning | General implementer; may spawn `scout` and `researcher` |
+| **scout** | session model | `read`, `grep`, `find`, `ls`, `codemode` | Fast read-only codebase recon |
+| **researcher** | session model | `web_search`, `fetch_content`, `codemode` | Web research, synthesized into a sourced brief |
+| **worker** | session model | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content`, `codemode` + spawning | General implementer; may spawn `scout` and `researcher` |
 
 Bundled agents omit `model`, so they run on the spawning session's current model (see [Model selection](#model-selection)). Set `model:` in an override file to pin one. All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
 
@@ -133,6 +134,18 @@ Spawn-time model resolution, most explicit source first:
 4. **pi's default** — only when the spawning session has no active model.
 
 `subagents_list` lists the exact usable ids in its "Model selection" section. Thinking levels still come from the agent's `thinking:` frontmatter; a `model: provider/id:level` suffix applies only when the definition doesn't pin `thinking:`.
+
+### Virtual models
+
+Virtual model ids (e.g. a router-backed `provider/auto`) only resolve in processes that loaded the extension that registered them. Restricted children carry **installed pi packages** (see [Tool access control](#tool-access-control)), so a virtual model whose registrar is an installed package works in the child. A bare parent `-e` router extension that is **not** an installed package is **not** discovered under `--no-extensions` and is **not** carried — the child can hit `Model "..." not found` and fatal-stall.
+
+Suggested pins while virtual-model carry of bare `-e` routers is not implemented:
+
+| Role | Suggested model | Why |
+| ---- | --------------- | --- |
+| Parent / orchestrator | Virtual router ok | Full extension discovery; registrar is loaded |
+| scout / researcher | Cheap physical id | Fast recon/research; avoid inheriting an unresolved virtual id |
+| worker | Stronger physical id, or omit to inherit the session model | Needs quality for edits; pin explicitly if the parent uses a virtual model |
 
 ## Custom agents
 
@@ -160,7 +173,7 @@ You are a specialized agent that does X...
 | `description` | string | Shown in `subagents_list` |
 | `model` | string | Default model (`provider/id`). Overrides the session default; a spawn-time `model` parameter still wins |
 | `thinking` | string | `minimal`, `low`, `medium`, or `high` |
-| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Extension-backed: `web_search`, `fetch_content`, `source_check`, `get_search_content` (from the [pi-web-access](https://pi.dev/packages/pi-web-access) package). Only the extensions backing the listed tools are loaded into the child |
+| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Pi builtin extension: `codemode` (auto-loads `-e builtin:codemode`). Extension-backed: `web_search`, `fetch_content`, `source_check`, `get_search_content` (from the [pi-web-access](https://pi.dev/packages/pi-web-access) package). Only the extensions backing the listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
@@ -188,6 +201,18 @@ Notes:
 ### interactive
 
 Controls whether `stalled`/`recovered` status transitions send a steer message to the parent session. Defaults to the inverse of `auto-exit`: autonomous agents get stall pings; user-driven agents stay quiet (the user is already working in that pane — the widget still updates). Set explicitly to override.
+
+## Codemode
+
+Requires **pi >= 0.99** (see [Requirements](#requirements)). Pi's built-in `codemode` tool is a QuickJS sandbox that can call other tools in parallel and return only script output.
+
+**How it reaches a restricted child.** Listing `codemode` in an agent's `tools:` allowlist is enough: the shared sandbox argv builder adds `-e builtin:codemode` once alongside `--no-extensions` and `--tools`. Resume re-derives the same flag from the stored allowlist string — no extra loadout field. Allowlists without `codemode` do not load the builtin; unrestricted (null) loadouts stay unrestricted.
+
+**What scripts cannot call.** This package registers `subagent`, `subagent_message`, `subagents_list`, and `ask_question` with `exposure: "model-only"`. The model still calls them directly; codemode scripts cannot. That blocks a script from fanning out unbounded `subagent` spawns in one `Promise.all`, or blocking mid-script on `ask_question`.
+
+**Settings trap — `codemode.mode: "only"`.** Children read the same settings as the parent (shared config dir, and project `.pi/settings.json` when the child runs in the same cwd). `codemode.mode: "only"` hides direct tool declarations from the model and defeats the bundled worker's guidance that edits stay on direct `edit` / `write`. Keep `codemode.mode` at `on` (the default) when relying on bundled agents.
+
+**Cost note.** Codemode scripts can call `models.classify()` using the session's credentials, which adds model cost beyond the sub-agent's own turns.
 
 ## Tool access control
 
@@ -243,7 +268,7 @@ If your shell startup is legitimately slower than the threshold (e.g. heavy `dir
 
 ## Requirements
 
-- [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`)
+- [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`) **>= 0.99** — required for built-in `codemode` and tool `exposure` (peer dependency floor)
 - [herdr](https://herdr.dev) >=0.8.2 — tested with 0.9.0; versions >=1.0.0 produce an untested-compatibility warning
 
 ```bash

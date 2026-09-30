@@ -1296,6 +1296,20 @@ describe("subagent discovery", () => {
     assert.ok(tools.has("bash"), "expected worker to keep bash");
   });
 
+  it("bundled scout/researcher/worker defaults include codemode", () => {
+    for (const name of ["scout", "researcher", "worker"]) {
+      const defs = testApi.loadAgentDefaults(name);
+      assert.ok(defs, `expected bundled agent ${name} to be discoverable`);
+      const tools = new Set(
+        (defs.tools ?? "")
+          .split(",")
+          .map((t: string) => t.trim())
+          .filter(Boolean),
+      );
+      assert.ok(tools.has("codemode"), `expected ${name} tools to include codemode`);
+    }
+  });
+
   it("scout and researcher are not granted spawning tools", () => {
     for (const name of ["scout", "researcher"]) {
       const defs = testApi.loadAgentDefaults(name);
@@ -1511,6 +1525,106 @@ describe("subagent discovery", () => {
         { artifactDir: d, name: "fork" },
       );
       assert.deepEqual(parts, []);
+    });
+  });
+
+  it("applySandboxToParts loads builtin:codemode once when allowlist includes codemode", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      // Duplicate entries and surrounding whitespace must still produce exactly one
+      // -e builtin:codemode (token match, not raw substring).
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "worker",
+          toolAllowlist: "read, codemode,bash,codemode",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "worker" },
+      );
+
+      const builtinPairs: string[] = [];
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (parts[i] === "-e" && parts[i + 1].includes("builtin:codemode")) {
+          builtinPairs.push(parts[i + 1]);
+        }
+      }
+      assert.equal(
+        builtinPairs.length,
+        1,
+        `expected exactly one -e builtin:codemode, got ${builtinPairs.join(", ")}`,
+      );
+      assert.ok(
+        builtinPairs[0] === "'builtin:codemode'" || builtinPairs[0] === "builtin:codemode",
+        `expected shell-escaped or raw builtin:codemode, got ${builtinPairs[0]}`,
+      );
+      assert.ok(parts.includes("--no-extensions"), "expected --no-extensions");
+      const toolsIdx = parts.indexOf("--tools");
+      assert.ok(toolsIdx >= 0, "expected --tools");
+      assert.ok(
+        parts[toolsIdx + 1].includes("codemode"),
+        "expected codemode to remain in the --tools allowlist",
+      );
+    });
+  });
+
+  it("applySandboxToParts does not load builtin:codemode for ordinary allowlists", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "scout",
+          toolAllowlist: "read,bash",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "scout" },
+      );
+
+      const joined = parts.join(" ");
+      assert.ok(
+        !joined.includes("builtin:codemode"),
+        "ordinary allowlist must not load builtin:codemode",
+      );
+      assert.ok(parts.includes("--no-extensions"), "expected --no-extensions");
+    });
+  });
+
+  it("applySandboxToParts does not inject builtin:codemode for unrestricted loadouts", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: null,
+          toolAllowlist: null,
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: false,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "fork" },
+      );
+      assert.deepEqual(parts, []);
+      assert.ok(!parts.join(" ").includes("builtin:codemode"));
     });
   });
 
@@ -1947,6 +2061,23 @@ describe("subagent-done.ts", () => {
       return { mock, restore };
     }
 
+    it("registers ask_question as model-only (not codemode-callable)", () => {
+      const dir = createTestDir();
+      const { mock, restore } = setupSubagentExtension(join(dir, "s.jsonl"));
+      try {
+        const tool = mock.registeredTools.find((t) => t.name === "ask_question");
+        assert.ok(tool, "expected ask_question to be registered");
+        assert.equal(
+          tool.exposure,
+          "model-only",
+          "ask_question must be model-only so codemode scripts cannot block on it",
+        );
+      } finally {
+        restore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it("registers ask_question (and no caller_ping) with a single freeform question param", () => {
       const dir = createTestDir();
       const { mock, restore } = setupSubagentExtension(join(dir, "s.jsonl"));
@@ -2233,6 +2364,20 @@ describe("tool registration", () => {
       assert.deepEqual(registeredMessageRenderers, []);
     } finally {
       restoreEnvVar("HERDR_ENV", originalHerdrEnv);
+    }
+  });
+
+  it("registers orchestration tools as model-only (not codemode-callable)", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    registerSubagentsForTest(api);
+    for (const name of ["subagent", "subagent_message", "subagents_list"]) {
+      const tool = registeredTools.find((t) => t.name === name);
+      assert.ok(tool, `expected ${name} to be registered`);
+      assert.equal(
+        tool.exposure,
+        "model-only",
+        `${name} must be model-only so codemode scripts cannot call it`,
+      );
     }
   });
 

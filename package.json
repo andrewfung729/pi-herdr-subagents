@@ -24,8 +24,8 @@
     "prepare": "husky || true"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-coding-agent": ">=0.99.0",
+    "@earendil-works/pi-tui": ">=0.99.0",
     "@sinclair/typebox": "*"
   },
   "pi": {
@@ -35,8 +35,8 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.10",
-    "@earendil-works/pi-coding-agent": "^0.84.3",
-    "@earendil-works/pi-tui": "^0.84.3",
+    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-tui": "^0.99.1",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^26.4.0",
     "@typescript/native-preview": "^7.0.0-dev.20260707.2",
