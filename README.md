@@ -35,7 +35,7 @@ Five things define this project as it stands. Each subsection is a capability yo
 - Stable two-column layout: the first sub-agent splits right off the parent pane; further concurrent sub-agents stack downward in that right-hand subtree. Herdr controls the ratios; adjust with `herdr pane resize`.
 - Screen reads use herdr's `recent-unwrapped` snapshot: a 200-rendered-row window, tail-sliced in JS. Output on an alternate screen that never enters the terminal stream is unrecoverable — bounded, like tmux scrollback.
 - Panes carry workspace-qualified ids (`w1:p3`) and are renamed to the sub-agent's name via `herdr pane rename`, so the herdr sidebar and tab strip stay legible.
-- herdr is a hard dependency: the tools and `/subagent` register only inside a herdr pane. The installed CLI is classified once per process — `>=0.8.2` required, tested with `0.9.0`, `>=1.0.0` runs with an untested-compatibility warning, and a missing or incompatible runtime raises an error notification. The bundled skill (`skills/herdr/`) is pinned to 0.9.0 and verified by `pnpm run check:herdr-skill`.
+- herdr is a hard dependency: the tools and `/subagent` register only inside a herdr pane. The installed CLI is classified once per process — `>=0.8.2` required, tested with `0.9.5`, `>=1.0.0` runs with an untested-compatibility warning, and a missing or incompatible runtime raises an error notification. The bundled skill (`skills/herdr/`) is pinned to 0.9.5 and verified by `pnpm run check:herdr-skill`.
 
 ### One wake-up per batch
 
@@ -276,7 +276,7 @@ If your shell startup is legitimately slower than the threshold (e.g. heavy `dir
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`) **>= 0.99** — required for built-in `codemode` and tool `exposure` (peer dependency floor)
-- [herdr](https://herdr.dev) >=0.8.2 — tested with 0.9.0; versions >=1.0.0 produce an untested-compatibility warning
+- [herdr](https://herdr.dev) >=0.8.2 — tested with 0.9.5; versions >=1.0.0 produce an untested-compatibility warning
 
 ```bash
 herdr          # start or attach to the persistent session
@@ -292,7 +292,7 @@ The first subagent pane is created with `herdr pane split --current --direction 
 pnpm install
 pnpm check                    # biome (lint + format) + tsgo typecheck
 pnpm test                     # unit tests (no multiplexer needed)
-pnpm run check:herdr-skill    # compare the bundled skill with pinned Herdr 0.9.0
+pnpm run check:herdr-skill    # compare the bundled skill with pinned Herdr 0.9.5
 pnpm run test:surface         # herdr surface tests (run inside herdr)
 pnpm run test:integration     # full lifecycle tests (real LLM calls, run inside herdr)
 ```

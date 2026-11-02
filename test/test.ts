@@ -3523,6 +3523,11 @@ describe("herdr.ts", () => {
         compatible: true,
         version: "0.9.0",
       });
+      assert.deepEqual(__herdrVersionTest__.classifyHerdrVersionOutput("herdr 0.9.5"), {
+        kind: "supported",
+        compatible: true,
+        version: "0.9.5",
+      });
     });
 
     it("rejects versions older than 0.8.2", () => {

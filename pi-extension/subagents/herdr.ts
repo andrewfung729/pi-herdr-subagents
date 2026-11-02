@@ -24,7 +24,7 @@ const execFileAsync = promisify(execFile);
 // ── Availability ──
 
 export const HERDR_MIN_VERSION = "0.8.2";
-export const HERDR_TESTED_VERSION = "0.9.0";
+export const HERDR_TESTED_VERSION = "0.9.5";
 export const HERDR_REVIEW_VERSION = "1.0.0";
 
 interface SemanticVersion {
