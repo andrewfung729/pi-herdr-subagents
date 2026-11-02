@@ -1,15 +1,14 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const SNAPSHOT_STALLED_AFTER_MS = 60_000;
 export const DEFAULT_STATUS_LINE_LIMIT = 4;
 export const MAX_STATUS_NAME_LENGTH = 72;
 export const MAX_STATUS_LINE_LENGTH = 120;
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_STATUS_CONFIG_PATH = join(PACKAGE_ROOT, "config.json");
-const STATUS_CONFIG_EXAMPLE_PATH = join(PACKAGE_ROOT, "config.json.example");
+/** Sidecar config filename under the agent dir and project `.pi/`. */
+export const CONFIG_FILE_NAME = "herdr-subagents.json";
 
 export type SubagentStatusKind = "starting" | "active" | "waiting" | "stalled" | "running";
 export type SubagentStatusSource = "pi";
@@ -20,6 +19,19 @@ export type StatusActivityPhase = "starting" | "active" | "waiting" | "done";
 export interface StatusConfig {
   enabled: boolean;
   lineLimit: number;
+}
+
+/** Built-in defaults — missing config files are not an error. */
+export const DEFAULT_STATUS_CONFIG: StatusConfig = {
+  enabled: true,
+  lineLimit: DEFAULT_STATUS_LINE_LIMIT,
+};
+
+export interface LoadStatusConfigOptions {
+  /** Project working directory; when set, also reads `<cwd>/.pi/herdr-subagents.json`. */
+  cwd?: string;
+  /** Override agent dir (tests). Defaults to `getAgentDir()`. */
+  agentDir?: string;
 }
 
 export type StatusObservation =
@@ -142,55 +154,74 @@ function activityLabel(
   return snapshot.activityLabel ?? snapshot.activeScope;
 }
 
-export function parseStatusConfig(rawConfig: unknown, source = "config.json"): StatusConfig {
+export function parseStatusConfig(rawConfig: unknown, source = CONFIG_FILE_NAME): StatusConfig {
+  const overlay = parseStatusConfigOverlay(rawConfig, source);
+  if (overlay.enabled === undefined) {
+    invalidStatusConfig(source, "status.enabled must be a boolean");
+  }
+  return {
+    enabled: overlay.enabled,
+    lineLimit: DEFAULT_STATUS_LINE_LIMIT,
+  };
+}
+
+interface StatusConfigOverlay {
+  enabled?: boolean;
+}
+
+function parseStatusConfigOverlay(rawConfig: unknown, source: string): StatusConfigOverlay {
   const config = requireObject(rawConfig, source, "root");
+  rejectUnsupportedKeys(config, ["status"], source, "root");
+  if (config.status === undefined) return {};
+
   const status = requireObject(config.status, source, "status");
   rejectUnsupportedKeys(status, ["enabled"], source, "status");
-  const enabled = requireBoolean(status.enabled, source, "status.enabled");
+  if (status.enabled === undefined) return {};
+
+  return { enabled: requireBoolean(status.enabled, source, "status.enabled") };
+}
+
+function readOptionalJsonFile(configPath: string): unknown | null {
+  let rawConfig: string;
+  try {
+    rawConfig = readFileSync(configPath, "utf8");
+  } catch (error) {
+    const errno = error as NodeJS.ErrnoException;
+    if (errno.code === "ENOENT") return null;
+    throw error;
+  }
+
+  try {
+    return JSON.parse(rawConfig) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSON in subagent config ${configPath}: ${detail}`);
+  }
+}
+
+/**
+ * Resolve status config: code defaults ← `~/.pi/agent/herdr-subagents.json`
+ * ← `<cwd>/.pi/herdr-subagents.json` (project wins). Missing files are skipped.
+ */
+export function loadStatusConfig(options: LoadStatusConfigOptions = {}): StatusConfig {
+  const agentDir = options.agentDir ?? getAgentDir();
+  const paths = [join(agentDir, CONFIG_FILE_NAME)];
+  if (options.cwd) {
+    paths.push(join(options.cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME));
+  }
+
+  let enabled = DEFAULT_STATUS_CONFIG.enabled;
+  for (const configPath of paths) {
+    const raw = readOptionalJsonFile(configPath);
+    if (raw === null) continue;
+    const overlay = parseStatusConfigOverlay(raw, configPath);
+    if (overlay.enabled !== undefined) enabled = overlay.enabled;
+  }
 
   return {
     enabled,
     lineLimit: DEFAULT_STATUS_LINE_LIMIT,
   };
-}
-
-function readStatusConfigFile(
-  configPath: string,
-  examplePath: string,
-): { sourcePath: string; rawConfig: string } {
-  try {
-    return { sourcePath: configPath, rawConfig: readFileSync(configPath, "utf8") };
-  } catch (error) {
-    const errno = error as NodeJS.ErrnoException;
-    if (errno.code !== "ENOENT") throw error;
-  }
-
-  try {
-    return { sourcePath: examplePath, rawConfig: readFileSync(examplePath, "utf8") };
-  } catch (error) {
-    const errno = error as NodeJS.ErrnoException;
-    if (errno.code === "ENOENT") {
-      throw new Error(`Missing subagent status config. Expected ${configPath} or ${examplePath}.`);
-    }
-    throw error;
-  }
-}
-
-export function loadStatusConfig(
-  configPath = DEFAULT_STATUS_CONFIG_PATH,
-  examplePath = STATUS_CONFIG_EXAMPLE_PATH,
-): StatusConfig {
-  const { sourcePath, rawConfig } = readStatusConfigFile(configPath, examplePath);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawConfig) as unknown;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSON in subagent config ${sourcePath}: ${detail}`);
-  }
-
-  return parseStatusConfig(parsed, sourcePath);
 }
 
 export function formatElapsedDuration(ms: number): string {

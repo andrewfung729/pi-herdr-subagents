@@ -561,7 +561,7 @@ function getArtifactDir(sessionDir: string, sessionId: string): string {
   return join(sessionDir, "artifacts", sessionId);
 }
 
-const statusConfig = loadStatusConfig();
+let statusConfig = loadStatusConfig();
 
 function formatWidgetRightLabel(snapshot: StatusSnapshot): string {
   if (snapshot.kind === "starting") return " starting… ";
@@ -1850,6 +1850,8 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    // Re-resolve with the session cwd so project `.pi/herdr-subagents.json` applies.
+    statusConfig = loadStatusConfig({ cwd: ctx.cwd });
     if (herdrCompatibilityWarning) {
       ctx.ui.notify(herdrCompatibilityWarning, "warning");
     }

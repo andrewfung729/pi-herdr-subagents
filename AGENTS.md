@@ -61,7 +61,7 @@ test/
 - **Tool access is whitelist-only.** Children launch with `--no-extensions --tools <allowlist>`; only extensions backing listed tools are re-loaded. Spawning depth is enforced via `PI_SUBAGENT_ALLOWED`. Don't weaken this. `codemode` is a pi builtin extension id (`-e builtin:codemode`) wired from the allowlist token — not a filesystem path from `getToolExtensionPath` and not package carry. Orchestration/ask tools this package registers (`subagent`, `subagent_message`, `subagents_list`, `ask_question`) stay `exposure: "model-only"` so codemode scripts cannot call them.
 - **Bundled agents omit `model`** so they run on the spawning session's current model. `subagents_list` exposes the session's scoped models, and spawn-time `model` parameters are validated against them (invalid ids fall back with a warning). `subagent_agents` frontmatter both grants and restricts the spawning toolset.
 - **Docs are the spec:** `README.md` describes observable behavior in detail (resume, loadout snapshots, auto-exit, fatal-stall escalation). If you change behavior, update README in the same change.
-- **config.json is gitignored** (copy from `config.json.example`); the `.memory/` dir is also ignored.
+- **User config lives outside the package:** `~/.pi/agent/herdr-subagents.json` and `<cwd>/.pi/herdr-subagents.json` (project wins; defaults in code; `herdr-subagents.example.json` is docs-only). The `.memory/` dir is gitignored.
 - Tests use `node --test` with type-stripped TS — no test framework deps. Integration tests run `--test-concurrency=1` because they share one herdr workspace.
 - Commit subjects: short capitalized imperative ("Escalate fatal startup stalls instead of waiting forever").
 

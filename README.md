@@ -252,13 +252,20 @@ paths are used as-is.
 
 The widget tracks each sub-agent from a runtime activity snapshot written by the child: `starting`, `active` (turn/provider/tool work), `waiting` (open for input or another stage), `stalled` (no valid snapshot for too long), or `running` (fallback). Sub-agent sessions also show their own tools widget — toggle it with `Ctrl+Alt+O`. Completion messages expand with `Ctrl+O`.
 
-Status display is configured via `config.json` in the extension directory (copy `config.json.example`; it's gitignored):
+Status display defaults to on. Override via agent-dir or project config (project wins):
+
+```bash
+cp herdr-subagents.example.json ~/.pi/agent/herdr-subagents.json
+# or: cp herdr-subagents.example.json .pi/herdr-subagents.json
+```
 
 ```json
 {
   "status": { "enabled": true }
 }
 ```
+
+Missing files are fine — built-in defaults apply (`status.enabled: true`). Package-root `config.json` is no longer read.
 
 ### Fatal startup stalls
 

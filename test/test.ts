@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   createSubagentActivityRecorder,
@@ -50,9 +49,11 @@ import {
 } from "../pi-extension/subagents/session.ts";
 import {
   advanceStatusState,
+  CONFIG_FILE_NAME,
   capStatusLines,
   classifyStatus,
   createStatusState,
+  DEFAULT_STATUS_CONFIG,
   forceStatusAfterInterrupt,
   formatStatusAggregate,
   formatStatusLine,
@@ -739,27 +740,50 @@ describe("status.ts", () => {
     });
   });
 
-  it("loads a valid config file", () => {
-    const examplePath = fileURLToPath(new URL("../config.json.example", import.meta.url));
-    const config = loadStatusConfig(examplePath);
-
-    assert.deepEqual(config, {
-      enabled: true,
-      lineLimit: 4,
+  it("uses built-in defaults when no config files exist", () => {
+    withTempDir((dir) => {
+      const config = loadStatusConfig({ agentDir: dir, cwd: join(dir, "project") });
+      assert.deepEqual(config, DEFAULT_STATUS_CONFIG);
     });
   });
 
-  it("loads the shared example when local config is absent", () => {
+  it("loads agent-dir config", () => {
     withTempDir((dir) => {
-      const examplePath = join(dir, "config.json.example");
-      writeFileSync(examplePath, `${JSON.stringify({ status: { enabled: true } }, null, 2)}\n`);
+      writeFileSync(
+        join(dir, CONFIG_FILE_NAME),
+        `${JSON.stringify({ status: { enabled: false } }, null, 2)}\n`,
+      );
 
-      const config = loadStatusConfig(join(dir, "config.json"), examplePath);
-
+      const config = loadStatusConfig({ agentDir: dir });
       assert.deepEqual(config, {
-        enabled: true,
+        enabled: false,
         lineLimit: 4,
       });
+    });
+  });
+
+  it("lets project config override agent-dir config", () => {
+    withTempDir((dir) => {
+      const projectDir = join(dir, "project");
+      mkdirSync(join(projectDir, ".pi"), { recursive: true });
+      writeFileSync(
+        join(dir, CONFIG_FILE_NAME),
+        `${JSON.stringify({ status: { enabled: false } }, null, 2)}\n`,
+      );
+      writeFileSync(
+        join(projectDir, ".pi", CONFIG_FILE_NAME),
+        `${JSON.stringify({ status: { enabled: true } }, null, 2)}\n`,
+      );
+
+      const config = loadStatusConfig({ agentDir: dir, cwd: projectDir });
+      assert.equal(config.enabled, true);
+    });
+  });
+
+  it("accepts partial overlays that omit status.enabled", () => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, CONFIG_FILE_NAME), `${JSON.stringify({}, null, 2)}\n`);
+      assert.deepEqual(loadStatusConfig({ agentDir: dir }), DEFAULT_STATUS_CONFIG);
     });
   });
 
@@ -772,39 +796,33 @@ describe("status.ts", () => {
       () => parseStatusConfig({ status: { enabled: true, defaultCadenceSeconds: 60 } }),
       /status has unsupported key\(s\): defaultCadenceSeconds/,
     );
+    assert.throws(() => parseStatusConfig({ status: {} }), /status\.enabled must be a boolean/);
   });
 
-  it("reports when neither local nor shared config exists", () => {
+  it("reports invalid JSON from the agent-dir config", () => {
     withTempDir((dir) => {
+      writeFileSync(join(dir, CONFIG_FILE_NAME), "{\n");
+
       assert.throws(
-        () => loadStatusConfig(join(dir, "config.json"), join(dir, "config.json.example")),
-        /Missing subagent status config\. Expected .*config\.json.*or.*config\.json\.example/,
+        () => loadStatusConfig({ agentDir: dir }),
+        new RegExp(`Invalid JSON in subagent config .*${CONFIG_FILE_NAME}`),
       );
     });
   });
 
-  it("reports invalid JSON from the shared example path", () => {
+  it("fails on invalid project config instead of keeping the agent-dir value", () => {
     withTempDir((dir) => {
-      const examplePath = join(dir, "config.json.example");
-      writeFileSync(examplePath, "{\n");
-
-      assert.throws(
-        () => loadStatusConfig(join(dir, "config.json"), examplePath),
-        /Invalid JSON in subagent config .*config\.json\.example/,
+      const projectDir = join(dir, "project");
+      mkdirSync(join(projectDir, ".pi"), { recursive: true });
+      writeFileSync(
+        join(dir, CONFIG_FILE_NAME),
+        `${JSON.stringify({ status: { enabled: false } }, null, 2)}\n`,
       );
-    });
-  });
-
-  it("fails on invalid local config instead of falling back to the shared example", () => {
-    withTempDir((dir) => {
-      const configPath = join(dir, "config.json");
-      const examplePath = join(dir, "config.json.example");
-      writeFileSync(configPath, "{\n");
-      writeFileSync(examplePath, `${JSON.stringify({ status: { enabled: true } }, null, 2)}\n`);
+      writeFileSync(join(projectDir, ".pi", CONFIG_FILE_NAME), "{\n");
 
       assert.throws(
-        () => loadStatusConfig(configPath, examplePath),
-        /Invalid JSON in subagent config .*config\.json/,
+        () => loadStatusConfig({ agentDir: dir, cwd: projectDir }),
+        new RegExp(`Invalid JSON in subagent config .*${CONFIG_FILE_NAME}`),
       );
     });
   });
