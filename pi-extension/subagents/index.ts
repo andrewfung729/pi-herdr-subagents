@@ -128,6 +128,15 @@ const SubagentParams = Type.Object({
         "Working directory for the sub-agent. The agent starts in this folder and picks up its local .pi/ config, AGENTS.md, skills, and extensions. Use for role-specific subfolders.",
     }),
   ),
+  mcp: Type.Optional(
+    Type.String({
+      description:
+        "Comma-separated MCP server names to make reachable inside the sub-agent (e.g. 'chrome-devtools'), " +
+        "or '*' for every server this session currently sees. Only applies to agents that restrict their " +
+        "tools; an unrestricted spawn already sees every MCP server. Agents that need MCP tools with " +
+        "codemode/deferred exposure must also list 'codemode' or 'tool_search' in their tools.",
+    }),
+  ),
 });
 
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
@@ -666,6 +675,8 @@ interface RunningSubagent {
   interactive: boolean;
   /** Set when a requested `model` failed scoped-model validation and fell back. */
   modelWarning?: string | null;
+  /** Spawn-time caveats surfaced in the launch acknowledgement (e.g. MCP selection). */
+  launchNotes?: string[];
 }
 
 /** All currently running subagents, keyed by id. */
@@ -879,7 +890,7 @@ const SUBAGENT_CONTROL_TOOLS = ["ask_question"] as const;
  */
 function buildSubagentToolAllowlist(
   effectiveTools?: string,
-  opts?: { grantSpawning?: boolean },
+  opts?: { grantSpawning?: boolean; mcpPatterns?: readonly string[] },
 ): string | null {
   const requested = (effectiveTools ?? "")
     .split(",")
@@ -887,10 +898,11 @@ function buildSubagentToolAllowlist(
     .filter(Boolean);
 
   const grantSpawning = opts?.grantSpawning ?? false;
+  const mcpPatterns = opts?.mcpPatterns ?? [];
 
-  // No explicit tool restriction and no spawning grant → don't pass --tools at
-  // all (the child keeps its default toolset).
-  if (requested.length === 0 && !grantSpawning) return null;
+  // No explicit tool restriction, no spawning grant, and no MCP selection →
+  // don't pass --tools at all (the child keeps its default toolset).
+  if (requested.length === 0 && !grantSpawning && mcpPatterns.length === 0) return null;
 
   const allow = new Set(requested);
   if (grantSpawning) {
@@ -899,9 +911,110 @@ function buildSubagentToolAllowlist(
   for (const tool of SUBAGENT_CONTROL_TOOLS) {
     allow.add(tool);
   }
+  // Spawn-time MCP selection lands in the same allowlist: pi keeps MCP tools
+  // only when a `mcp__` entry exists, and then only the matching ones.
+  for (const pattern of mcpPatterns) {
+    allow.add(pattern);
+  }
 
   return [...allow].join(",");
 }
+
+/**
+ * pi's tool namespace for one MCP server: `mcp__<server>`, with every character
+ * other than letters, digits, and `_` replaced by `_`. Mirrors pi-mcp's
+ * mcpNamespace() so a spawn-time server name can be turned into a `--tools`
+ * pattern.
+ */
+export function mcpToolNamespace(server: string): string {
+  const bare = server.trim().replace(/^mcp__/, "");
+  return `mcp__${bare.replace(/[^A-Za-z0-9_]/g, "_")}`;
+}
+
+/**
+ * MCP server namespaces this session currently sees, derived from registered
+ * tool names (`mcp__<server>__<tool>`).
+ *
+ * Tool names are the only complete source: `pi.getMcpServers()` lists servers
+ * extensions registered, not the ones from `mcp.json`. They are also exactly
+ * the prefixes `--tools` patterns have to match.
+ */
+export function listMcpToolNamespaces(tools: readonly { name: string }[]): string[] {
+  const namespaces = new Set<string>();
+  for (const tool of tools) {
+    const match = /^(mcp__[A-Za-z0-9_]+)__/.exec(tool.name);
+    if (match) namespaces.add(match[1]);
+  }
+  return [...namespaces].sort();
+}
+
+export interface McpSelection {
+  /** `--tools` patterns (`mcp__<server>__*`) for the child. */
+  patterns: string[];
+  /** Namespaces the patterns cover. */
+  namespaces: string[];
+  /** Human-readable problem with the selection, when it cannot do what was asked. */
+  warning?: string;
+}
+
+/**
+ * Expand a spawn-time `mcp` selection into child `--tools` patterns.
+ *
+ * `*` means "every MCP server this session currently sees"; a comma-separated
+ * list names servers explicitly. Names are normalized to pi's tool namespace, so
+ * `chrome-devtools` and `chrome_devtools` both select `mcp__chrome_devtools__*`.
+ * Unknown names are passed through (a server may connect in the child even when
+ * it has not connected here yet) but produce a warning when the session sees
+ * other servers and none of the requested ones.
+ */
+export function resolveMcpSelection(
+  spec: string | undefined,
+  availableNamespaces: readonly string[],
+): McpSelection {
+  const raw = (spec ?? "").trim();
+  if (!raw) return { patterns: [], namespaces: [] };
+
+  if (raw === "*") {
+    if (availableNamespaces.length === 0) {
+      return {
+        patterns: [],
+        namespaces: [],
+        warning:
+          "mcp='*' was requested but this session has no connected MCP servers; the subagent gets no MCP tools.",
+      };
+    }
+    return {
+      patterns: availableNamespaces.map((ns) => `${ns}__*`),
+      namespaces: [...availableNamespaces],
+    };
+  }
+
+  const requested = raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const namespaces: string[] = [];
+  for (const name of requested) {
+    const ns = mcpToolNamespace(name);
+    if (!namespaces.includes(ns)) namespaces.push(ns);
+  }
+  const patterns = namespaces.map((ns) => `${ns}__*`);
+
+  const available = new Set(availableNamespaces);
+  if (namespaces.length > 0 && available.size > 0 && !namespaces.some((ns) => available.has(ns))) {
+    return {
+      patterns,
+      namespaces,
+      warning:
+        `None of the requested MCP servers (${requested.join(", ")}) are connected in this session ` +
+        `(connected: ${[...available].join(", ")}). The subagent only reaches them if they connect there.`,
+    };
+  }
+  return { patterns, namespaces };
+}
+
+/** MCP exposure needs one of these builtins active in the child to be callable. */
+const MCP_REACHABILITY_TOOLS = ["codemode", "tool_search"] as const;
 
 /**
  * Apply a loadout snapshot's sandbox to a pi command's `parts` array: model,
@@ -992,6 +1105,21 @@ function applySandboxToParts(
     // `--no-extensions` (once; duplicate allowlist entries stay idempotent).
     if (allowlistTools.includes("codemode")) {
       parts.push("-e", shellEscape("builtin:codemode"));
+    }
+
+    // MCP support is a pi builtin extension too, so `--no-extensions` tears it
+    // down: a child with `mcp.json` servers gets no tools at all. An allowlist
+    // entry under the `mcp__` namespace is the opt-in — pi keeps MCP tools only
+    // when one exists, and then only the matching ones — so this stays exact:
+    // no `mcp__` token means no MCP in the child.
+    if (allowlistTools.some((tool) => tool.startsWith("mcp__"))) {
+      parts.push("-e", shellEscape("builtin:mcp"));
+    }
+
+    // `deferred`-exposure MCP tools are declared to the model by tool_search.
+    // Without it they register but cannot be called.
+    if (allowlistTools.includes("tool_search")) {
+      parts.push("-e", shellEscape("builtin:tool-search"));
     }
   }
 }
@@ -1269,6 +1397,9 @@ export const __test__ = {
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
   buildSubagentToolAllowlist,
+  mcpToolNamespace,
+  listMcpToolNamespaces,
+  resolveMcpSelection,
   applySandboxToParts,
   buildPiPromptArgs,
   formatWidgetRightLabel,
@@ -1331,6 +1462,8 @@ async function launchSubagent(
     model?: SessionModel | null;
     /** The spawning session's scoped models, when any are configured. */
     scopedModels?: readonly SessionModel[] | null;
+    /** MCP server namespaces visible to the spawning session (see listMcpToolNamespaces). */
+    mcpNamespaces?: readonly string[] | null;
   },
   options?: { surface?: string },
 ): Promise<RunningSubagent> {
@@ -1441,11 +1574,40 @@ async function launchSubagent(
       ? localAgentDir
       : (process.env.PI_CODING_AGENT_DIR ?? null);
 
+  // MCP is opt-in per spawn. A restricted child (`tools:` in the agent, or a
+  // spawning grant) gets `-e builtin:mcp` plus one `mcp__<server>__*` allowlist
+  // entry per selected server; an unrestricted spawn already sees every MCP
+  // server the parent does, so a selection cannot narrow it.
+  const restrictedChild = !!effectiveTools?.trim() || grantSpawning;
+  const mcpSelection = resolveMcpSelection(params.mcp, ctx.mcpNamespaces ?? []);
+  const mcpPatterns = restrictedChild ? mcpSelection.patterns : [];
+  const launchNotes: string[] = [];
+  if (mcpSelection.warning) launchNotes.push(mcpSelection.warning);
+  if (mcpSelection.patterns.length > 0 && !restrictedChild) {
+    launchNotes.push(
+      "This spawn is unrestricted, so it already sees every MCP server the parent does; the `mcp` selection was ignored.",
+    );
+  }
+
   // Default-deny model: when an agent restricts its tools (or is granted the
   // spawning toolset), we disable global extension discovery and re-enable only
   // the extensions backing the whitelisted tools. Bare/fork spawns with no tool
   // restriction keep their full default toolset and all global extensions.
-  const toolAllowlist = buildSubagentToolAllowlist(effectiveTools, { grantSpawning });
+  const toolAllowlist = buildSubagentToolAllowlist(effectiveTools, { grantSpawning, mcpPatterns });
+
+  // MCP tools with codemode/deferred exposure register but stay unreachable
+  // without codemode or tool_search in the child. Warn instead of shipping a
+  // silently dead MCP grant — this covers both the spawn-time `mcp` parameter
+  // and an agent that names `mcp__<server>__*` in its own `tools:`.
+  const allowlistTokens = (toolAllowlist ?? "").split(",");
+  if (
+    allowlistTokens.some((tool) => tool.startsWith("mcp__")) &&
+    !MCP_REACHABILITY_TOOLS.some((tool) => allowlistTokens.includes(tool))
+  ) {
+    launchNotes.push(
+      `MCP tools with codemode/deferred exposure are unreachable unless the child also has ${MCP_REACHABILITY_TOOLS.join(" or ")}; add one to the agent's tools.`,
+    );
+  }
 
   // Snapshot the fully-resolved sandbox beside the session file so a later
   // `subagent_message({ name })` resume can replay the exact same
@@ -1562,6 +1724,7 @@ async function launchSubagent(
       startTimeMs: startTime,
     }),
     modelWarning,
+    launchNotes: launchNotes.length > 0 ? launchNotes : undefined,
   };
 
   runningSubagents.set(id, running);
@@ -2020,6 +2183,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
               provider: s.model.provider,
               id: s.model.id,
             })),
+            mcpNamespaces: listMcpToolNamespaces(pi.getAllTools()),
           },
         );
       } finally {
@@ -2084,13 +2248,16 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
         });
 
       // Return immediately
-      const modelWarningPrefix = running.modelWarning ? `${running.modelWarning} ` : "";
+      const warningPrefix = [running.modelWarning, ...(running.launchNotes ?? [])]
+        .filter((note): note is string => !!note)
+        .map((note) => `${note} `)
+        .join("");
       return {
         content: [
           {
             type: "text",
             text:
-              modelWarningPrefix +
+              warningPrefix +
               `Sub-agent "${params.name}" launched and is now running in the background. ` +
               `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
               `The result will be delivered automatically; concurrent autonomous results trigger one steer after the batch finishes. ` +
@@ -2106,6 +2273,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
           launchScriptFile: running.launchScriptFile,
           status: "started",
           ...(running.modelWarning ? { modelWarning: running.modelWarning } : {}),
+          ...(running.launchNotes ? { launchNotes: running.launchNotes } : {}),
         },
       };
     },
@@ -2176,11 +2344,13 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
     description:
       "List all available subagent definitions plus the models usable by the subagent tool. " +
       "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-      "Project-local agents override global ones with the same name.",
+      "Project-local agents override global ones with the same name. " +
+      "Also lists the MCP servers this session can hand to a subagent via the subagent tool's mcp parameter.",
     promptSnippet:
       "List all available subagent definitions plus the models usable by the subagent tool. " +
       "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-      "Project-local agents override global ones with the same name.",
+      "Project-local agents override global ones with the same name. " +
+      "Also lists the MCP servers this session can hand to a subagent via the subagent tool's mcp parameter.",
     parameters: Type.Object({}),
 
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -2196,10 +2366,20 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
         })),
       });
 
+      const mcpServers = listMcpToolNamespaces(pi.getAllTools()).map((ns) =>
+        ns.replace(/^mcp__/, ""),
+      );
+      const mcpMenu =
+        mcpServers.length > 0
+          ? `MCP servers reachable by subagents (pass mcp="<name>" or mcp="*" when spawning; the agent also needs codemode or tool_search): ${mcpServers.join(", ")}`
+          : "No MCP servers connected in this session.";
+
       if (list.length === 0) {
         return {
-          content: [{ type: "text", text: `No subagent definitions found.\n\n${modelMenu}` }],
-          details: { agents: [] },
+          content: [
+            { type: "text", text: `No subagent definitions found.\n\n${modelMenu}\n\n${mcpMenu}` },
+          ],
+          details: { agents: [], mcpServers },
         };
       }
 
@@ -2211,16 +2391,25 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       });
 
       return {
-        content: [{ type: "text", text: `${lines.join("\n")}\n\n${modelMenu}` }],
-        details: { agents: list },
+        content: [{ type: "text", text: `${lines.join("\n")}\n\n${modelMenu}\n\n${mcpMenu}` }],
+        details: { agents: list, mcpServers },
       };
     },
 
     renderResult(result, _opts, theme) {
       const details = result.details as any;
       const agents = details?.agents ?? [];
+      const mcpServers: string[] = details?.mcpServers ?? [];
+      const mcpLine =
+        mcpServers.length > 0
+          ? [theme.fg("dim", `MCP: ${mcpServers.join(", ")}`)]
+          : [theme.fg("dim", "MCP: none connected")];
       if (agents.length === 0) {
-        return new Text(theme.fg("dim", "No subagent definitions found."), 0, 0);
+        return new Text(
+          [theme.fg("dim", "No subagent definitions found."), ...mcpLine].join("\n"),
+          0,
+          0,
+        );
       }
       const lines = agents.map((a: any) => {
         const badge = a.source === "project" ? theme.fg("accent", " (project)") : "";
@@ -2228,7 +2417,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
         const model = a.model ? theme.fg("dim", ` [${a.model}]`) : "";
         return `  ${theme.fg("toolTitle", theme.bold(a.name))}${badge}${model}${desc}`;
       });
-      return new Text(lines.join("\n"), 0, 0);
+      return new Text([...lines, ...mcpLine].join("\n"), 0, 0);
     },
   });
 

@@ -72,7 +72,7 @@ The extension registers its tools and `/subagent` command only when Pi starts in
 | --- | --- |
 | `subagent` | Spawn a sub-agent in a dedicated herdr pane (async). Model-only — not callable from codemode scripts |
 | `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished. Model-only |
-| `subagents_list` | List available agent definitions. Model-only |
+| `subagents_list` | List available agent definitions plus the MCP servers a sub-agent can be given. Model-only |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply. Model-only |
 | `codemode` | *(in children when allowlisted)* Pi's built-in QuickJS sandbox for parallel tool calls; see [Codemode](#codemode) |
 
@@ -92,6 +92,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 | `name` | string | agent name | Display name for the pane and widget row. Must be unique — duplicates are auto-suffixed (`scout`, `scout-2`, …) |
 | `model` | string | agent's model | Override the model for this spawn |
 | `cwd` | string | agent's `cwd` | Working directory (see [Role folders](#role-folders)) |
+| `mcp` | string | none | MCP servers to make reachable inside the child: comma-separated names (`chrome-devtools`) or `*` for every server this session sees. Only applies to agents that restrict their tools (see [MCP servers](#mcp-servers)) |
 
 ### Messaging
 
@@ -173,7 +174,7 @@ You are a specialized agent that does X...
 | `description` | string | Shown in `subagents_list` |
 | `model` | string | Default model (`provider/id`). Overrides the session default; a spawn-time `model` parameter still wins |
 | `thinking` | string | `minimal`, `low`, `medium`, or `high` |
-| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Pi builtin extension: `codemode` (auto-loads `-e builtin:codemode`). Extension-backed: `web_search`, `fetch_content`, `source_check`, `get_search_content` (from the [pi-web-access](https://pi.dev/packages/pi-web-access) package). Only the extensions backing the listed tools are loaded into the child |
+| `tools` | string | Strict tool allowlist. Built-ins: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`. Pi builtin extensions: `codemode` (auto-loads `-e builtin:codemode`) and `tool_search` (auto-loads `-e builtin:tool-search`). MCP tools: `mcp__<server>__*` (auto-loads `-e builtin:mcp`, see [MCP servers](#mcp-servers)). Extension-backed: `web_search`, `fetch_content`, `source_check`, `get_search_content` (from the [pi-web-access](https://pi.dev/packages/pi-web-access) package). Only the extensions backing the listed tools are loaded into the child |
 | `subagent_agents` | string | Comma-separated agent names this agent may spawn. **Presence of this field grants the spawning toolset** (`subagent`, `subagent_message`, `subagents_list`) and restricts spawn targets to the list. Omit it and the agent cannot spawn at all |
 | `skills` | string | Comma-separated skill names to auto-load |
 | `session-mode` | string | `standalone` (default), `lineage-only`, or `fork` — see below |
@@ -213,6 +214,23 @@ Requires **pi >= 0.99** (see [Requirements](#requirements)). Pi's built-in `code
 **Settings trap — `codemode.mode: "only"`.** Children read the same settings as the parent (shared config dir, and project `.pi/settings.json` when the child runs in the same cwd). `codemode.mode: "only"` hides direct tool declarations from the model and defeats the bundled worker's guidance that edits stay on direct `edit` / `write`. Keep `codemode.mode` at `on` (the default) when relying on bundled agents.
 
 **Cost note.** Codemode scripts can call `models.classify()` using the session's credentials, which adds model cost beyond the sub-agent's own turns.
+
+## MCP servers
+
+An agent that lists `tools:` runs with `--no-extensions`, which also disables pi's built-in MCP support — so a restricted child gets **no** MCP tools from `~/.pi/agent/mcp.json` or `<cwd>/.pi/mcp.json` unless it opts in. There are two equivalent opt-ins:
+
+- **Spawn-time:** `subagent({ agent: "browser", mcp: "chrome-devtools", task: "..." })`. Comma-separated server names, or `mcp: "*"` for every server the spawning session currently sees. `subagents_list` prints the servers it can offer.
+- **In the agent file:** name the tools directly, e.g. `tools: read, bash, codemode, mcp__chrome-devtools__*` (server names are normalized, so `mcp__chrome-devtools__*` and `mcp__chrome_devtools__*` are the same entry).
+
+Either way the selection is materialized into the child's `--tools` allowlist as one `mcp__<server>__*` pattern per server, and the sandbox argv builder adds `-e builtin:mcp`. The whitelist stays exact: no `mcp__` entry means no MCP in the child, and the entries that are there limit the child to those servers (pi keeps MCP tools only when such an entry exists). Resume replays the stored allowlist, so a resumed sub-agent keeps the same MCP access with no extra loadout field.
+
+**Reachability needs codemode or tool_search.** A server whose tools use `codemode` or `deferred` exposure (the default) registers its tools into the child but pi cannot call them unless `codemode` or `tool_search` is also in the agent's `tools:`, and `subagent` warns at spawn time when it is missing. Servers configured with `"exposure": "direct"` are declared to the model like any other tool and need neither.
+
+Notes:
+
+- **Unrestricted spawns already have every server.** A spawn with no `tools:` restriction keeps its full default toolset along with extension discovery, so MCP is on and `mcp` cannot narrow it — the parameter is ignored with a note in the launch acknowledgement.
+- **Project-scope servers need project trust in the child too.** `<cwd>/.pi/mcp.json` is read only for a trusted project, exactly as in the parent session.
+- **Servers must exist in the child's config.** The child reads the same agent dir (`PI_CODING_AGENT_DIR`) and its own cwd; a selected name that this session has not connected is passed through with a warning rather than dropped.
 
 ## Tool access control
 

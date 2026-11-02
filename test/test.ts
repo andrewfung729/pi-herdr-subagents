@@ -1622,6 +1622,156 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("applySandboxToParts loads builtin:mcp once when the allowlist names an MCP namespace", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "browser",
+          toolAllowlist: "read, codemode,mcp__chrome_devtools__*,mcp__chrome_devtools__*",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "browser" },
+      );
+
+      const builtinMcp = parts.filter(
+        (part, i) => i > 0 && parts[i - 1] === "-e" && part.includes("builtin:mcp"),
+      );
+      assert.equal(
+        builtinMcp.length,
+        1,
+        `expected exactly one -e builtin:mcp, got ${builtinMcp.length}`,
+      );
+      assert.ok(
+        builtinMcp[0] === "'builtin:mcp'" || builtinMcp[0] === "builtin:mcp",
+        `unexpected builtin:mcp form: ${builtinMcp[0]}`,
+      );
+      assert.ok(parts.includes("--no-extensions"), "expected --no-extensions");
+      const toolsIdx = parts.indexOf("--tools");
+      assert.ok(
+        parts[toolsIdx + 1].includes("mcp__chrome_devtools__*"),
+        "expected the MCP pattern to stay in the --tools allowlist",
+      );
+    });
+  });
+
+  it("applySandboxToParts keeps MCP out of allowlists without an mcp__ entry", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "scout",
+          toolAllowlist: "read,grep,codemode",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "scout" },
+      );
+      assert.ok(!parts.join(" ").includes("builtin:mcp"), "no mcp__ token must mean no MCP");
+    });
+  });
+
+  it("applySandboxToParts loads builtin:tool-search when the allowlist includes tool_search", () => {
+    withTempDir((d) => {
+      const parts: string[] = [];
+      testApi.applySandboxToParts(
+        parts,
+        {
+          agent: "browser",
+          toolAllowlist: "read,mcp__dummy__*,tool_search",
+          model: null,
+          thinking: null,
+          systemPromptMode: null,
+          identity: null,
+          spawnable: null,
+          autoExit: true,
+          cwd: null,
+          agentDir: null,
+        },
+        { artifactDir: d, name: "browser" },
+      );
+      const searchFlags = parts.filter(
+        (part, i) => i > 0 && parts[i - 1] === "-e" && part.includes("builtin:tool-search"),
+      );
+      assert.equal(searchFlags.length, 1, "expected one -e builtin:tool-search");
+      assert.ok(
+        !parts.join(" ").includes("builtin:codemode"),
+        "tool_search must not pull in codemode",
+      );
+    });
+  });
+
+  it("mcpToolNamespace normalizes server names to pi's tool namespace", () => {
+    assert.equal(testApi.mcpToolNamespace("chrome-devtools"), "mcp__chrome_devtools");
+    assert.equal(testApi.mcpToolNamespace("mcp__chrome_devtools"), "mcp__chrome_devtools");
+    assert.equal(testApi.mcpToolNamespace(" docs.api "), "mcp__docs_api");
+  });
+
+  it("listMcpToolNamespaces dedupes and sorts namespaces from registered tools", () => {
+    const namespaces = testApi.listMcpToolNamespaces([
+      { name: "read" },
+      { name: "mcp__zulu__take_snapshot" },
+      { name: "mcp__alpha__search" },
+      { name: "mcp__alpha__read" },
+      { name: "list_mcp_resources" },
+    ]);
+    assert.deepEqual(namespaces, ["mcp__alpha", "mcp__zulu"]);
+  });
+
+  it("resolveMcpSelection expands '*' to every visible namespace", () => {
+    const selection = testApi.resolveMcpSelection("*", ["mcp__alpha", "mcp__zulu"]);
+    assert.deepEqual(selection.patterns, ["mcp__alpha__*", "mcp__zulu__*"]);
+    assert.equal(selection.warning, undefined);
+  });
+
+  it("resolveMcpSelection warns when '*' finds no connected server", () => {
+    const selection = testApi.resolveMcpSelection("*", []);
+    assert.deepEqual(selection.patterns, []);
+    assert.match(selection.warning ?? "", /no connected MCP servers/);
+  });
+
+  it("resolveMcpSelection accepts bare server names and keeps unknown names", () => {
+    const selection = testApi.resolveMcpSelection("chrome-devtools, zulu", ["mcp__zulu"]);
+    assert.deepEqual(selection.patterns, ["mcp__chrome_devtools__*", "mcp__zulu__*"]);
+    assert.equal(selection.warning, undefined, "one known server is enough to stay silent");
+
+    const unknown = testApi.resolveMcpSelection("nope", ["mcp__zulu"]);
+    assert.deepEqual(unknown.patterns, ["mcp__nope__*"]);
+    assert.match(unknown.warning ?? "", /None of the requested MCP servers/);
+  });
+
+  it("resolveMcpSelection is a no-op without a spec", () => {
+    const selection = testApi.resolveMcpSelection(undefined, ["mcp__alpha"]);
+    assert.deepEqual(selection.patterns, []);
+    assert.equal(selection.warning, undefined);
+  });
+
+  it("buildSubagentToolAllowlist folds MCP patterns into the allowlist", () => {
+    const allowlist = testApi.buildSubagentToolAllowlist("read,bash", {
+      grantSpawning: false,
+      mcpPatterns: ["mcp__alpha__*"],
+    });
+    assert.equal(allowlist, "read,bash,ask_question,mcp__alpha__*");
+
+    assert.equal(testApi.buildSubagentToolAllowlist("read,bash", {}), "read,bash,ask_question");
+    assert.equal(testApi.buildSubagentToolAllowlist(undefined, {}), null);
+  });
+
   it("applySandboxToParts does not inject builtin:codemode for unrestricted loadouts", () => {
     withTempDir((d) => {
       const parts: string[] = [];
@@ -2434,7 +2584,7 @@ describe("tool registration", () => {
     assert.match(result.content[0].text, /not a known agent/i);
   });
 
-  it("exposes a debloated schema: agent+task required, name/model/cwd optional, no override knobs", () => {
+  it("exposes a debloated schema: agent+task required, name/model/cwd/mcp optional, no override knobs", () => {
     const { api, registeredTools } = createMockExtensionApi();
     registerSubagentsForTest(api);
 
@@ -2444,8 +2594,8 @@ describe("tool registration", () => {
     const props = subagentTool.parameters.properties;
     assert.deepEqual(
       Object.keys(props).sort(),
-      ["agent", "cwd", "model", "name", "task"],
-      "only agent/task/name/model/cwd should remain",
+      ["agent", "cwd", "mcp", "model", "name", "task"],
+      "only agent/task/name/model/cwd/mcp should remain",
     );
     assert.deepEqual(
       [...(subagentTool.parameters.required ?? [])].sort(),
