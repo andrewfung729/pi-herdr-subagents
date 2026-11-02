@@ -12,7 +12,7 @@
     "url": "https://github.com/andrewfung729/pi-herdr-subagents.git"
   },
   "type": "module",
-  "packageManager": "pnpm@11.24.0",
+  "packageManager": "pnpm@12.17.0",
   "scripts": {
     "test": "node --test test/test.ts",
     "test:unit": "node --test test/test.ts test/system-prompt-mode.test.ts",

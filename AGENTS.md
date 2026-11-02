@@ -17,7 +17,7 @@ Upstream repos document a different system (tmux surface, different tool names a
 ## Commands
 
 ```bash
-pnpm install                  # pnpm@11 (Corepack)
+pnpm install                  # pnpm@12 (mise; see packageManager)
 pnpm check                    # biome lint+format (error-on-warnings) + tsgo typecheck — must pass before commit (husky pre-commit)
 pnpm fix                      # biome autofix
 pnpm test                     # unit tests (node --test) — no multiplexer needed, safe anywhere
