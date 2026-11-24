@@ -32,7 +32,10 @@ import {
   decodeAppSurface,
   encodeAppSurface,
   handOffAppLaunch,
+  isAncestorPid,
   isPendingAppLaunch,
+  labeledRunArgs,
+  labelHostFromTerminal,
   launchBootstrapArgv,
   parseAppReadOutput,
   pendingLaunchPath,
@@ -4263,6 +4266,12 @@ describe("herdr.ts", () => {
       assert.deepEqual(decodeAppSurface(noPid), { pane: "p1", terminal: "t1", launch: "ff" });
     });
 
+    it("round-trips a labeled terminal without a pane id", () => {
+      const id = encodeAppSurface({ pane: "", terminal: "t8", pid: 99, launch: "0a" });
+      assert.deepEqual(decodeAppSurface(id), { pane: "", terminal: "t8", pid: 99, launch: "0a" });
+      assert.equal(decodeAppSurface("herdr-app||"), null);
+    });
+
     it("rejects malformed ids and leaves herdr pane ids alone", () => {
       assert.equal(decodeAppSurface("w1:p3"), null);
       assert.equal(decodeAppSurface("herdr-app|p1"), null);
@@ -4317,6 +4326,64 @@ describe("herdr.ts", () => {
     });
   });
 
+  describe("herdr-app labeled terminals (remote spaces)", () => {
+    const labels = { "herdr.space": "sp1", "herdr.tab": "tb1" };
+
+    it("hosts sub-agents in the terminal's labeled space and tab", () => {
+      assert.deepEqual(
+        labelHostFromTerminal({ pid: 10, labels }, (pid) => pid === 10),
+        { space: "sp1", tab: "tb1" },
+      );
+    });
+
+    it("refuses terminals without labels or not above this process", () => {
+      assert.equal(
+        labelHostFromTerminal({ pid: 10, labels: { where: "x" } }, () => true),
+        null,
+      );
+      assert.equal(
+        labelHostFromTerminal({ labels }, () => true),
+        null,
+      );
+      assert.equal(
+        labelHostFromTerminal({ pid: 10, labels }, () => false),
+        null,
+      );
+    });
+
+    it("walks parent pids up to init", () => {
+      const parents: Record<number, number> = { 500: 400, 400: 300, 300: 1 };
+      const parentOf = (pid: number) => parents[pid] ?? null;
+      assert.equal(isAncestorPid(500, parentOf, 500), true);
+      assert.equal(isAncestorPid(300, parentOf, 500), true);
+      assert.equal(isAncestorPid(1, parentOf, 500), false);
+      assert.equal(isAncestorPid(42, parentOf, 500), false);
+    });
+
+    it("starts an adopted, parentless terminal in the given folder", () => {
+      assert.deepEqual(
+        labeledRunArgs({ space: "sp1", tab: "tb1" }, "/srv/app", ["bash", "-c", "x"]),
+        [
+          "run",
+          "--bg",
+          "--json",
+          "--no-parent",
+          "--cwd",
+          "/srv/app",
+          "--label",
+          "herdr.space=sp1",
+          "--label",
+          "herdr.tab=tb1",
+          "--",
+          "bash",
+          "-c",
+          "x",
+        ],
+      );
+      assert.equal(labeledRunArgs({ space: "s", tab: "t" }, "/", []).includes("--"), false);
+    });
+  });
+
   describe("herdr-app versions", () => {
     it("supports the tested versions and newer patches", () => {
       assert.equal(classifyHerdrAppVersions("herdr-app 0.1.17", "hc 0.1.22").kind, "supported");
@@ -4329,6 +4396,14 @@ describe("herdr.ts", () => {
       assert.equal(old.kind, "unsupported");
       assert.match(old.message ?? "", /herdr-app 0\.1\.16 is too old/);
       assert.equal(classifyHerdrAppVersions("", "hc 0.1.22").kind, "unsupported");
+    });
+
+    it("checks only hc for labeled terminals", () => {
+      assert.deepEqual(classifyHerdrAppVersions(null, "hc 0.1.22"), {
+        kind: "supported",
+        version: "hc 0.1.22",
+      });
+      assert.equal(classifyHerdrAppVersions(null, "hc 0.1.21").kind, "unsupported");
     });
   });
 

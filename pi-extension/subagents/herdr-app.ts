@@ -20,6 +20,13 @@
  * with `hc read`.
  *
  * Splits do not keep focus; if the app moves focus anyway, it is put back.
+ *
+ * Remote spaces: a terminal in a space on a machine added with
+ * `hc machine add` runs on that machine, where `herdr-app` cannot see the
+ * window. There the sub-agent is started with `hc run` and the terminal's own
+ * `herdr.space`/`herdr.tab` labels; the app adopts any labeled terminal as a
+ * pane in that tab. Such surfaces have no pane id (the app places the pane),
+ * and everything else goes through `hc` as usual.
  */
 import { execFile, execFileSync, type StdioOptions } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -49,6 +56,7 @@ const APP_READ_FLOOR_LINES = 200;
 const LAUNCH_WAIT_SECONDS = 600;
 
 export interface AppSurfaceRef {
+  /** App pane id; empty for a labeled terminal the app adopts (remote spaces). */
   pane: string;
   terminal: string;
   /** Program pid when the pane was created. */
@@ -70,7 +78,7 @@ export function decodeAppSurface(surface: string): AppSurfaceRef | null {
   if (parts.length < 2 || parts.length > 4) return null;
   try {
     const [pane, terminal, pid, launch] = parts.map((part) => decodeURIComponent(part));
-    if (!pane || !terminal) return null;
+    if (!terminal) return null;
     const ref: AppSurfaceRef = { pane, terminal };
     if (pid) {
       const parsed = Number(pid);
@@ -245,6 +253,79 @@ export function paneForTerminal(terminalId: string): AppSurfaceRef {
   );
 }
 
+/** The space and tab the app shows a labeled terminal in (labels are local to its machine). */
+export interface AppLabelHost {
+  space: string;
+  tab: string;
+}
+
+/**
+ * The labeled-terminal host from `hc get --json` of this terminal, or null.
+ * The terminal's program must be an ancestor of this process, so a leaked
+ * `HC_TERMINAL_ID` does not send panes to a tab pi is not in.
+ */
+export function labelHostFromTerminal(
+  info: any,
+  isAncestor: (pid: number) => boolean,
+): AppLabelHost | null {
+  const space = info?.labels?.["herdr.space"];
+  const tab = info?.labels?.["herdr.tab"];
+  if (typeof space !== "string" || space === "" || typeof tab !== "string" || tab === "") {
+    return null;
+  }
+  if (typeof info?.pid !== "number" || !isAncestor(info.pid)) return null;
+  return { space, tab };
+}
+
+/** Whether `pid` is `start` or one of its ancestors. */
+export function isAncestorPid(
+  pid: number,
+  parentOf: (pid: number) => number | null,
+  start: number = process.pid,
+): boolean {
+  let current: number | null = start;
+  for (let depth = 0; depth < 64 && current !== null && current > 1; depth++) {
+    if (current === pid) return true;
+    current = parentOf(current);
+  }
+  return false;
+}
+
+function parentPid(pid: number): number | null {
+  try {
+    const parent = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], SYNC_OPTS).trim());
+    return Number.isInteger(parent) && parent > 0 ? parent : null;
+  } catch {
+    return null;
+  }
+}
+
+function currentLabelHost(): AppLabelHost | null {
+  const terminalId = process.env.HC_TERMINAL_ID;
+  if (!terminalId) return null;
+  try {
+    const info = JSON.parse(hc(["get", "--json", terminalId]));
+    return labelHostFromTerminal(info, (pid) => isAncestorPid(pid, parentPid));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where sub-agents of this terminal go: a pane `herdr-app` can split, or,
+ * when the app cannot see this terminal (a remote space), the labels that
+ * make the app adopt a terminal into this tab.
+ */
+export function currentAppHost():
+  | { pane: AppSurfaceRef }
+  | { labels: AppLabelHost }
+  | { error: string } {
+  const pane = currentAppPane();
+  if ("ref" in pane) return { pane: pane.ref };
+  const labels = currentLabelHost();
+  return labels ? { labels } : { error: pane.error };
+}
+
 /** The current terminal's pane, or why there is none. */
 export function currentAppPane(): { ref: AppSurfaceRef } | { error: string } {
   const terminalId = process.env.HC_TERMINAL_ID;
@@ -285,22 +366,24 @@ export type AppVersionStatus =
 /**
  * Classify `herdr-app --version` and `hc --version`. Older than the tested
  * versions is unsupported (launch panes need `pane.split --argv` and hc's
- * exit codes); a newer minor or major runs with a warning.
+ * exit codes); a newer minor or major runs with a warning. `appOutput` is
+ * null for labeled terminals (remote spaces), which use only hc.
  */
-export function classifyHerdrAppVersions(appOutput: string, hcOutput: string): AppVersionStatus {
-  const app = parseSemver(appOutput);
+export function classifyHerdrAppVersions(
+  appOutput: string | null,
+  hcOutput: string,
+): AppVersionStatus {
+  const app = appOutput === null ? null : parseSemver(appOutput);
   const core = parseSemver(hcOutput);
-  if (!app || !core) {
+  if ((appOutput !== null && !app) || !core) {
     return {
       kind: "unsupported",
-      message: `Could not parse herdr-app/hc version output: ${appOutput.trim() || "<empty>"} / ${hcOutput.trim() || "<empty>"}`,
+      message: `Could not parse herdr-app/hc version output: ${appOutput?.trim() || "<empty>"} / ${hcOutput.trim() || "<empty>"}`,
     };
   }
-  const version = `herdr-app ${app.raw} / hc ${core.raw}`;
-  const checks: Array<[string, Semver, string]> = [
-    ["herdr-app", app, HERDR_APP_TESTED_VERSION],
-    ["hc", core, HC_TESTED_VERSION],
-  ];
+  const version = app ? `herdr-app ${app.raw} / hc ${core.raw}` : `hc ${core.raw}`;
+  const checks: Array<[string, Semver, string]> = [["hc", core, HC_TESTED_VERSION]];
+  if (app) checks.unshift(["herdr-app", app, HERDR_APP_TESTED_VERSION]);
   const untested: string[] = [];
   for (const [name, found, testedRaw] of checks) {
     const tested = parseSemver(testedRaw) as Semver;
@@ -325,10 +408,10 @@ export function classifyHerdrAppVersions(appOutput: string, hcOutput: string): A
   return { kind: "supported", version };
 }
 
-/** Read and classify the installed herdr-app and hc versions. */
-export function readHerdrAppVersionStatus(): AppVersionStatus {
+/** Read and classify the installed herdr-app (unless `hcOnly`) and hc versions. */
+export function readHerdrAppVersionStatus(hcOnly = false): AppVersionStatus {
   try {
-    const app = execFileSync("herdr-app", ["--version"], SYNC_OPTS);
+    const app = hcOnly ? null : execFileSync("herdr-app", ["--version"], SYNC_OPTS);
     const core = execFileSync("hc", ["--version"], SYNC_OPTS);
     return classifyHerdrAppVersions(app, core);
   } catch (error) {
@@ -421,22 +504,59 @@ export function isPendingAppLaunch(surface: string): boolean {
 
 // ── Surface primitives ──
 
+/** `hc run` arguments for a terminal the app adopts into `host`'s tab. */
+export function labeledRunArgs(host: AppLabelHost, cwd: string, argv: string[]): string[] {
+  return [
+    "run",
+    "--bg",
+    "--json",
+    // No parent: hc would type notes about the child into the parent pi's input.
+    "--no-parent",
+    "--cwd",
+    cwd,
+    "--label",
+    `herdr.space=${host.space}`,
+    "--label",
+    `herdr.tab=${host.tab}`,
+    ...(argv.length > 0 ? ["--", ...argv] : []),
+  ];
+}
+
+// shortcut: the app places adopted panes itself (each one splits the last pane to the right)
+// and they keep the program's title; upgrade if hc labels ever choose placement or a name.
+function createLabeledSurface(host: AppLabelHost, cwd: string, launch?: string): string {
+  const argv = launch ? launchBootstrapArgv(pendingLaunchPath(launch)) : [];
+  const created = JSON.parse(hc(labeledRunArgs(host, cwd, argv)));
+  const terminal = created?.address;
+  if (typeof terminal !== "string" || terminal === "") {
+    throw new Error(`Unexpected hc run output: ${JSON.stringify(created)}`);
+  }
+  return encodeAppSurface({ pane: "", terminal, pid: terminalPid(terminal), launch });
+}
+
 /**
  * Split `direction` off `fromSurface`, or off the caller's pane when omitted.
  * Herdr app splits inherit the source pane's directory. With `launch`, the
  * pane runs the launch bootstrap instead of a shell (see `handOffAppLaunch`).
+ * In a remote space (no pane the app can split) the terminal is started with
+ * `hc run` in `cwd` and adopted by the app; `direction` does not apply.
  */
 export function createAppSurfaceSplit(
   name: string,
   direction: "right" | "down",
   fromSurface?: string,
-  options?: { launch?: boolean },
+  options?: { launch?: boolean; cwd?: string },
 ): string {
-  const source = fromSurface
-    ? mustDecode(fromSurface)
-    : paneForTerminal(process.env.HC_TERMINAL_ID ?? "");
-  const args: Record<string, string> = { direction, pane: source.pane };
   const launch = options?.launch ? randomBytes(8).toString("hex") : undefined;
+  let source = fromSurface ? mustDecode(fromSurface) : undefined;
+  if (!source?.pane) {
+    const host = currentAppHost();
+    if ("error" in host) throw new Error(host.error);
+    if ("labels" in host)
+      return createLabeledSurface(host.labels, options?.cwd ?? process.cwd(), launch);
+    source = host.pane;
+  }
+  const args: Record<string, string> = { direction, pane: source.pane };
   if (launch) args.argv = JSON.stringify(launchBootstrapArgv(pendingLaunchPath(launch)));
 
   const focusBefore = focusedPane();
@@ -564,10 +684,12 @@ export async function appTerminalStateAsync(surface: string): Promise<AppTermina
 export function closeAppSurface(surface: string): void {
   const ref = mustDecode(surface);
   let failure: unknown;
-  try {
-    appDo("pane.close", { pane: ref.pane });
-  } catch (error) {
-    if (!isAppPaneMissing(error)) failure = error;
+  if (ref.pane) {
+    try {
+      appDo("pane.close", { pane: ref.pane });
+    } catch (error) {
+      if (!isAppPaneMissing(error)) failure = error;
+    }
   }
   // pane.close does not always end the terminal before it returns.
   try {

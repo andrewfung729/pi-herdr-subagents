@@ -3,7 +3,8 @@
  *
  * - **Herdr app**: `herdr-app do pane.split` plus `hc` for send/read/kill.
  *   Active when `HC_TERMINAL_ID` is set and this terminal has a pane in the
- *   app. See `herdr-app.ts`.
+ *   app, or (a remote space) carries the app's space/tab labels, so sub-agents
+ *   start with `hc run` and the app adopts them. See `herdr-app.ts`.
  * - **herdr** (the TUI): `herdr pane split|run|read|close`. Active when
  *   `HERDR_ENV=1` and `herdr pane current` finds this pane. Pane ids are
  *   workspace-qualified (`w1:p3`).
@@ -31,7 +32,7 @@ import {
   appTerminalStateAsync,
   closeAppSurface,
   createAppSurfaceSplit,
-  currentAppPane,
+  currentAppHost,
   decodeAppSurface,
   handOffAppLaunch,
   isPendingAppLaunch,
@@ -190,21 +191,21 @@ function runtimeCacheKey(): string {
 }
 
 function getHerdrAppRuntimeStatus(): HerdrRuntimeStatus {
-  if (!hasCommand("herdr-app") || !hasCommand("hc")) {
+  if (!hasCommand("hc")) {
     return {
       kind: "missing",
       compatible: false,
       backend: "herdr-app",
-      message: "Herdr app subagents need both the `herdr-app` and `hc` CLIs on PATH.",
+      message: "Herdr app subagents need the `hc` CLI on PATH.",
     };
   }
-  // No pane for this terminal (window closed, a pane-less `hc run` terminal,
-  // or a leaked HC_TERMINAL_ID): this process is not in the Herdr app.
-  const pane = currentAppPane();
-  if ("error" in pane) {
-    return { kind: "outside-herdr", compatible: false, backend: "herdr-app", message: pane.error };
+  // Neither a pane the app shows nor the app's space/tab labels (a pane-less
+  // `hc run` terminal, or a leaked HC_TERMINAL_ID): not in the Herdr app.
+  const host = currentAppHost();
+  if ("error" in host) {
+    return { kind: "outside-herdr", compatible: false, backend: "herdr-app", message: host.error };
   }
-  const version = readHerdrAppVersionStatus();
+  const version = readHerdrAppVersionStatus("labels" in host);
   if (version.kind === "unsupported") {
     return {
       kind: "unsupported",
@@ -415,7 +416,7 @@ export function createSurfaceSplit(
   options?: SurfaceOptions,
 ): string {
   if (requireSurface() === "herdr-app") {
-    return createAppSurfaceSplit(name, direction, fromSurface, options);
+    return createAppSurfaceSplit(name, direction, fromSurface, { ...options, cwd });
   }
 
   const args = [
