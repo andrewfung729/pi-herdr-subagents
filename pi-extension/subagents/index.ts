@@ -19,6 +19,7 @@ import {
   readSubagentActivityFile,
   type SubagentActivityState,
 } from "./activity.ts";
+import { safeLoadModelsConfig } from "./config.ts";
 import {
   closeSurface,
   createSurface,
@@ -33,7 +34,15 @@ import {
   shellEscape,
   surfaceNeedsShellReadyDelay,
 } from "./herdr.ts";
-import { formatModelMenu, resolveSpawnModel, type SessionModel } from "./models.ts";
+import {
+  buildModelArg,
+  formatModelMenu,
+  formatModelProvenance,
+  resolveSpawnModelDetailed,
+  type SessionModel,
+  type SpawnModelResolution,
+  tiersWithoutCandidates,
+} from "./models.ts";
 import { mergeExtensionPaths, resolvePackageExtensions } from "./packages.ts";
 import {
   countSessionEntryLines,
@@ -118,9 +127,11 @@ const SubagentParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Model override as provider/id, e.g. from the scoped models listed by subagents_list. " +
-        "Validated against this session's scoped models when those are configured — an out-of-scope " +
-        "id falls back to the session default with a warning. Omit to run on this session's current model.",
+        'Model override: a tier name from the models config (e.g. "fast" or "strong", listed by subagents_list), ' +
+        "or a provider/id such as one of the scoped models listed by subagents_list. " +
+        "A tier resolves to its first usable candidate. Concrete ids are validated against this session's " +
+        "scoped models when those are configured — an out-of-scope id falls back to the next source with a " +
+        "warning. Omit to use the agent's role mapping or this session's current model.",
     }),
   ),
   cwd: Type.Optional(
@@ -679,8 +690,10 @@ interface RunningSubagent {
    * subagent's pane (e.g. planner).
    */
   interactive: boolean;
-  /** Set when a requested `model` failed scoped-model validation and fell back. */
+  /** Set when a requested `model` or tier was rejected and the spawn fell back. */
   modelWarning?: string | null;
+  /** How the child's model was chosen (source, tier), for the launch acknowledgement. */
+  modelResolution?: SpawnModelResolution;
   /** Spawn-time caveats surfaced in the launch acknowledgement (e.g. MCP selection). */
   launchNotes?: string[];
 }
@@ -1042,8 +1055,7 @@ function applySandboxToParts(
   opts: { artifactDir: string; name: string },
 ): void {
   if (loadout.model) {
-    const model = loadout.thinking ? `${loadout.model}:${loadout.thinking}` : loadout.model;
-    parts.push("--model", shellEscape(model));
+    parts.push("--model", shellEscape(buildModelArg(loadout.model, loadout.thinking)));
   } else if (loadout.thinking) {
     // No model override (agent follows pi's default model) — thinking still
     // applies via the standalone flag instead of the `model:thinking` suffix.
@@ -1482,11 +1494,14 @@ async function launchSubagent(
   const id = Math.random().toString(16).slice(2, 10);
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent, ctx.cwd) : null;
-  const modelResolution = resolveSpawnModel({
+  const modelsLoad = safeLoadModelsConfig({ cwd: ctx.cwd });
+  const modelResolution = resolveSpawnModelDetailed({
     requestedModel: params.model,
+    agentName: params.agent,
     agentModel: agentDefs?.model,
     sessionModel: ctx.model ?? null,
     scopedModels: ctx.scopedModels ?? null,
+    modelsConfig: modelsLoad.config,
   });
   const effectiveModel = modelResolution.model ?? undefined;
   const modelWarning = modelResolution.warning;
@@ -1593,6 +1608,9 @@ async function launchSubagent(
   const mcpSelection = resolveMcpSelection(params.mcp, ctx.mcpNamespaces ?? []);
   const mcpPatterns = restrictedChild ? mcpSelection.patterns : [];
   const launchNotes: string[] = [];
+  if (modelsLoad.errors.length > 0) {
+    launchNotes.push(`Models config ignored: ${modelsLoad.errors[0]}`);
+  }
   if (mcpSelection.warning) launchNotes.push(mcpSelection.warning);
   if (mcpSelection.patterns.length > 0 && !restrictedChild) {
     launchNotes.push(
@@ -1735,6 +1753,7 @@ async function launchSubagent(
       startTimeMs: startTime,
     }),
     modelWarning,
+    modelResolution,
     launchNotes: launchNotes.length > 0 ? launchNotes : undefined,
   };
 
@@ -2031,6 +2050,20 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
     if (herdrCompatibilityWarning) {
       ctx.ui.notify(herdrCompatibilityWarning, "warning");
     }
+    const models = safeLoadModelsConfig({ cwd: ctx.cwd });
+    if (models.errors.length > 0) {
+      ctx.ui.notify(`Subagent models config ignored:\n${models.errors.join("\n")}`, "warning");
+    }
+    const scopedForTiers = ctx.scopedModels?.map((s) => ({
+      provider: s.model.provider,
+      id: s.model.id,
+    }));
+    for (const tier of tiersWithoutCandidates(models.config, scopedForTiers)) {
+      ctx.ui.notify(
+        `Subagent model tier "${tier}" has no candidate in this session's scoped models.`,
+        "info",
+      );
+    }
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
@@ -2261,6 +2294,9 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
         });
 
       // Return immediately
+      const modelLine = running.modelResolution
+        ? `${formatModelProvenance(running.modelResolution, params.agent)}\n`
+        : "";
       const warningPrefix = [running.modelWarning, ...(running.launchNotes ?? [])]
         .filter((note): note is string => !!note)
         .map((note) => `${note} `)
@@ -2270,6 +2306,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
           {
             type: "text",
             text:
+              modelLine +
               warningPrefix +
               `Sub-agent "${params.name}" launched and is now running in the background. ` +
               `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
@@ -2377,6 +2414,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
           provider: s.model.provider,
           id: s.model.id,
         })),
+        modelsConfig: safeLoadModelsConfig({ cwd: ctx.cwd }).config,
       });
 
       const mcpServers = listMcpToolNamespaces(pi.getAllTools()).map((ns) =>

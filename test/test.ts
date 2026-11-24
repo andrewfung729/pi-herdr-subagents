@@ -12,6 +12,11 @@ import {
   readSubagentActivityFile,
 } from "../pi-extension/subagents/activity.ts";
 import {
+  loadModelsConfig,
+  parseModelsConfig,
+  safeLoadModelsConfig,
+} from "../pi-extension/subagents/config.ts";
+import {
   __herdrVersionTest__,
   __pollForExitTest__,
   herdrPaneCheckSaysOutside,
@@ -34,9 +39,14 @@ import {
 } from "../pi-extension/subagents/herdr-app.ts";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
+  buildModelArg,
   formatModelMenu,
+  formatModelProvenance,
   resolveSpawnModel,
+  resolveSpawnModelDetailed,
+  resolveTier,
   splitThinkingSuffix,
+  tiersWithoutCandidates,
 } from "../pi-extension/subagents/models.ts";
 import {
   mergeExtensionPaths,
@@ -755,6 +765,157 @@ describe("status.ts", () => {
     assert.deepEqual(disabled, {
       enabled: false,
       lineLimit: 4,
+    });
+  });
+
+  it("loadStatusConfig ignores a models section", () => {
+    withTempDir((dir) => {
+      writeFileSync(
+        join(dir, CONFIG_FILE_NAME),
+        `${JSON.stringify(
+          {
+            status: { enabled: false },
+            models: { tiers: { fast: ["anthropic/claude-haiku-5-5"] }, agents: { scout: "fast" } },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      assert.deepEqual(loadStatusConfig({ agentDir: dir }), { enabled: false, lineLimit: 4 });
+    });
+  });
+
+  describe("models config", () => {
+    it("parses a valid models section", () => {
+      const r = parseModelsConfig({
+        models: {
+          tiers: {
+            fast: [" anthropic/claude-haiku-5-5 ", "openai/gpt-x-mini:low"],
+            strong: ["anthropic/claude-opus-5-5:high"],
+          },
+          agents: { scout: "fast", worker: "strong", reviewer: "anthropic/claude-opus-5-5" },
+        },
+      });
+      assert.deepEqual(r.errors, []);
+      assert.deepEqual(r.config, {
+        tiers: {
+          fast: ["anthropic/claude-haiku-5-5", "openai/gpt-x-mini:low"],
+          strong: ["anthropic/claude-opus-5-5:high"],
+        },
+        agents: { scout: "fast", worker: "strong", reviewer: "anthropic/claude-opus-5-5" },
+      });
+    });
+
+    it("treats a file without a models section as empty with no errors", () => {
+      assert.deepEqual(parseModelsConfig({ status: { enabled: true } }), {
+        config: { tiers: {}, agents: {} },
+        errors: [],
+      });
+    });
+
+    it("rejects a tier name that is not a safe identifier", () => {
+      const r = parseModelsConfig({ models: { tiers: { "fast/x": ["anthropic/a"] } } }, "f.json");
+      assert.match(r.errors.join("\n"), /tier name "fast\/x"/);
+      assert.deepEqual(r.config, { tiers: {}, agents: {} });
+    });
+
+    it("rejects an empty candidate list", () => {
+      const r = parseModelsConfig({ models: { tiers: { fast: [] } } }, "f.json");
+      assert.match(r.errors.join("\n"), /models\.tiers\.fast must be a non-empty array/);
+      assert.deepEqual(r.config, { tiers: {}, agents: {} });
+    });
+
+    it("rejects a candidate without a provider", () => {
+      const r = parseModelsConfig({ models: { tiers: { fast: ["haiku"] } } }, "f.json");
+      assert.match(r.errors.join("\n"), /provider\/id/);
+      assert.deepEqual(r.config, { tiers: {}, agents: {} });
+    });
+
+    it("rejects an agents value that references an undefined tier", () => {
+      const r = parseModelsConfig({ models: { agents: { scout: "fast" } } }, "f.json");
+      assert.match(r.errors.join("\n"), /models\.agents\.scout references undefined tier "fast"/);
+      assert.deepEqual(r.config, { tiers: {}, agents: {} });
+    });
+
+    it("returns errors instead of throwing on unknown keys or a non-object section", () => {
+      const unknownKey = parseModelsConfig({ models: { tiers: {}, bogus: 1 } }, "f.json");
+      assert.match(unknownKey.errors.join("\n"), /unsupported key\(s\): bogus/);
+      assert.deepEqual(unknownKey.config, { tiers: {}, agents: {} });
+
+      const notObject = parseModelsConfig({ models: "fast" }, "f.json");
+      assert.match(notObject.errors.join("\n"), /models must be an object/);
+      assert.deepEqual(notObject.config, { tiers: {}, agents: {} });
+    });
+
+    it("merges global and project config per key", () => {
+      withTempDir((dir) => {
+        const projectDir = join(dir, "project");
+        mkdirSync(join(projectDir, ".pi"), { recursive: true });
+        writeFileSync(
+          join(dir, CONFIG_FILE_NAME),
+          `${JSON.stringify({
+            models: {
+              tiers: { fast: ["zai/glm-5.3"], strong: ["anthropic/claude-opus-5-5"] },
+              agents: { scout: "fast", worker: "strong" },
+            },
+          })}\n`,
+        );
+        writeFileSync(
+          join(projectDir, ".pi", CONFIG_FILE_NAME),
+          `${JSON.stringify({
+            models: {
+              tiers: { fast: ["anthropic/claude-haiku-5-5"] },
+              agents: { scout: "strong" },
+            },
+          })}\n`,
+        );
+
+        const r = loadModelsConfig({ agentDir: dir, cwd: projectDir });
+        assert.deepEqual(r.errors, []);
+        assert.deepEqual(r.config, {
+          tiers: {
+            fast: ["anthropic/claude-haiku-5-5"],
+            strong: ["anthropic/claude-opus-5-5"],
+          },
+          agents: { scout: "strong", worker: "strong" },
+        });
+      });
+    });
+
+    it("returns empty config and no errors when no config files exist", () => {
+      withTempDir((dir) => {
+        assert.deepEqual(loadModelsConfig({ agentDir: dir, cwd: join(dir, "project") }), {
+          config: { tiers: {}, agents: {} },
+          errors: [],
+        });
+      });
+    });
+
+    it("empties the whole config when the project file is invalid", () => {
+      withTempDir((dir) => {
+        const projectDir = join(dir, "project");
+        mkdirSync(join(projectDir, ".pi"), { recursive: true });
+        writeFileSync(
+          join(dir, CONFIG_FILE_NAME),
+          `${JSON.stringify({ models: { tiers: { fast: ["zai/glm-5.3"] } } })}\n`,
+        );
+        writeFileSync(
+          join(projectDir, ".pi", CONFIG_FILE_NAME),
+          `${JSON.stringify({ models: { agents: { scout: "nope" } } })}\n`,
+        );
+        const r = loadModelsConfig({ agentDir: dir, cwd: projectDir });
+        assert.match(r.errors.join("\n"), /undefined tier "nope"/);
+        assert.deepEqual(r.config, { tiers: {}, agents: {} });
+      });
+    });
+  });
+
+  it("safeLoadModelsConfig returns errors and an empty config on invalid JSON", () => {
+    withTempDir((dir) => {
+      writeFileSync(join(dir, CONFIG_FILE_NAME), "{\n");
+      const r = safeLoadModelsConfig({ agentDir: dir });
+      assert.deepEqual(r.config, { tiers: {}, agents: {} });
+      assert.match(r.errors.join("\n"), /Invalid JSON in subagent config/);
     });
   });
 
@@ -1896,6 +2057,312 @@ describe("subagent discovery", () => {
 
     it("returns null when nothing is specified", () => {
       assert.deepEqual(resolveSpawnModel({ scopedModels: scoped }), { model: null, warning: null });
+    });
+  });
+
+  describe("buildModelArg", () => {
+    it("lets an explicit thinking level replace a single valid suffix", () => {
+      assert.equal(
+        buildModelArg("anthropic/claude-opus-5-5:high", "low"),
+        "anthropic/claude-opus-5-5:low",
+      );
+    });
+
+    it("keeps a suffix when no thinking level is pinned", () => {
+      assert.equal(
+        buildModelArg("anthropic/claude-opus-5-5:high", null),
+        "anthropic/claude-opus-5-5:high",
+      );
+      assert.equal(
+        buildModelArg("anthropic/claude-opus-5-5:high"),
+        "anthropic/claude-opus-5-5:high",
+      );
+    });
+
+    it("appends thinking to a plain ref", () => {
+      assert.equal(
+        buildModelArg("anthropic/claude-opus-5-5", "high"),
+        "anthropic/claude-opus-5-5:high",
+      );
+    });
+
+    it("keeps a non-thinking colon segment and appends thinking after it", () => {
+      assert.equal(buildModelArg("openrouter/a/b:free", "high"), "openrouter/a/b:free:high");
+    });
+  });
+
+  describe("resolveTier", () => {
+    const scoped = [
+      { provider: "zai", id: "glm-5.3" },
+      { provider: "anthropic", id: "claude-haiku-5-5" },
+    ];
+
+    it("drops candidates outside the scoped models", () => {
+      assert.equal(
+        resolveTier(["openai/gpt-x", "anthropic/claude-haiku-5-5"], null, scoped),
+        "anthropic/claude-haiku-5-5",
+      );
+    });
+
+    it("prefers a candidate on the session model's provider", () => {
+      assert.equal(
+        resolveTier(
+          ["anthropic/claude-haiku-5-5", "zai/glm-5.3"],
+          { provider: "zai", id: "glm-5.3" },
+          null,
+        ),
+        "zai/glm-5.3",
+      );
+    });
+
+    it("falls back to the first remaining candidate", () => {
+      assert.equal(resolveTier(["x/a", "y/b"], { provider: "z", id: "c" }, null), "x/a");
+    });
+
+    it("returns null when no candidate is in scope", () => {
+      assert.equal(resolveTier(["openai/gpt-x"], null, scoped), null);
+    });
+
+    it("keeps the thinking suffix on the returned ref", () => {
+      assert.equal(
+        resolveTier(["openai/x:high", "anthropic/y:low"], { provider: "anthropic", id: "y" }, null),
+        "anthropic/y:low",
+      );
+      assert.equal(
+        resolveTier(["anthropic/claude-opus-5-5:high"], null, null),
+        "anthropic/claude-opus-5-5:high",
+      );
+    });
+  });
+
+  describe("resolveSpawnModelDetailed with models config", () => {
+    const scoped = [
+      { provider: "anthropic", id: "claude-haiku-5-5" },
+      { provider: "anthropic", id: "claude-opus-5-5" },
+      { provider: "zai", id: "glm-5.3" },
+    ];
+    const session = { provider: "zai", id: "glm-5.3" };
+    const modelsConfig = {
+      tiers: {
+        fast: ["anthropic/claude-haiku-5-5", "openai/gpt-x-mini"],
+        strong: ["anthropic/claude-opus-5-5:high"],
+        gone: ["openrouter/nope/x"],
+      },
+      agents: {
+        scout: "fast",
+        worker: "strong",
+        reviewer: "anthropic/claude-opus-5-5",
+        odd: "gone",
+      },
+    };
+
+    it("resolves a tier passed as the model parameter", () => {
+      assert.deepEqual(
+        resolveSpawnModelDetailed({
+          requestedModel: "fast",
+          agentName: "worker",
+          sessionModel: session,
+          scopedModels: scoped,
+          modelsConfig,
+        }),
+        {
+          model: "anthropic/claude-haiku-5-5",
+          warning: null,
+          source: "param-tier",
+          tier: "fast",
+        },
+      );
+    });
+
+    it("falls back to the agent pin with a warning when the requested tier has no candidate", () => {
+      const r = resolveSpawnModelDetailed({
+        requestedModel: "gone",
+        agentModel: "anthropic/claude-haiku-4-5",
+        sessionModel: session,
+        scopedModels: scoped,
+        modelsConfig,
+      });
+      assert.equal(r.model, "anthropic/claude-haiku-4-5");
+      assert.equal(r.source, "agent");
+      assert.equal(r.tier, null);
+      assert.match(r.warning ?? "", /Tier "gone" has no candidate/);
+      assert.match(r.warning ?? "", /pinned/);
+    });
+
+    it("falls through to the role tier, then the session, when a tier has no candidate", () => {
+      const viaRole = resolveSpawnModelDetailed({
+        requestedModel: "gone",
+        agentName: "scout",
+        sessionModel: session,
+        scopedModels: scoped,
+        modelsConfig,
+      });
+      assert.equal(viaRole.model, "anthropic/claude-haiku-5-5");
+      assert.equal(viaRole.source, "role-tier");
+      assert.equal(viaRole.tier, "fast");
+      assert.match(viaRole.warning ?? "", /Tier "gone" has no candidate/);
+
+      const viaSession = resolveSpawnModelDetailed({
+        requestedModel: "gone",
+        agentName: "odd",
+        sessionModel: session,
+        scopedModels: scoped,
+        modelsConfig,
+      });
+      assert.equal(viaSession.model, "zai/glm-5.3");
+      assert.equal(viaSession.source, "session");
+      assert.match(viaSession.warning ?? "", /Tier "gone" for role "odd"/);
+    });
+
+    it("lets the agent's frontmatter pin beat the role map", () => {
+      assert.deepEqual(
+        resolveSpawnModelDetailed({
+          agentName: "scout",
+          agentModel: "anthropic/claude-haiku-4-5",
+          sessionModel: session,
+          scopedModels: scoped,
+          modelsConfig,
+        }),
+        { model: "anthropic/claude-haiku-4-5", warning: null, source: "agent", tier: null },
+      );
+    });
+
+    it("applies a role tier with its thinking suffix", () => {
+      assert.deepEqual(
+        resolveSpawnModelDetailed({
+          agentName: "worker",
+          sessionModel: session,
+          scopedModels: scoped,
+          modelsConfig,
+        }),
+        {
+          model: "anthropic/claude-opus-5-5:high",
+          warning: null,
+          source: "role-tier",
+          tier: "strong",
+        },
+      );
+    });
+
+    it("applies a role concrete ref without scope validation", () => {
+      assert.deepEqual(
+        resolveSpawnModelDetailed({
+          agentName: "reviewer",
+          sessionModel: session,
+          scopedModels: scoped,
+          modelsConfig,
+        }),
+        { model: "anthropic/claude-opus-5-5", warning: null, source: "role", tier: null },
+      );
+    });
+
+    it("uses the session model when the agent has no role entry", () => {
+      assert.deepEqual(
+        resolveSpawnModelDetailed({
+          agentName: "unmapped",
+          sessionModel: session,
+          scopedModels: scoped,
+          modelsConfig,
+        }),
+        { model: "zai/glm-5.3", warning: null, source: "session", tier: null },
+      );
+    });
+
+    it("keeps the pre-tier result when no models config is given", () => {
+      assert.deepEqual(
+        resolveSpawnModelDetailed({
+          agentName: "scout",
+          sessionModel: session,
+          scopedModels: scoped,
+        }),
+        { model: "zai/glm-5.3", warning: null, source: "session", tier: null },
+      );
+      assert.deepEqual(resolveSpawnModelDetailed({}), {
+        model: null,
+        warning: null,
+        source: "default",
+        tier: null,
+      });
+    });
+
+    it("resolveSpawnModel returns only model and warning", () => {
+      assert.deepEqual(
+        resolveSpawnModel({ agentName: "worker", sessionModel: session, modelsConfig }),
+        { model: "anthropic/claude-opus-5-5:high", warning: null },
+      );
+    });
+  });
+
+  describe("tiersWithoutCandidates", () => {
+    const modelsConfig = {
+      tiers: { fast: ["anthropic/claude-haiku-5-5"], gone: ["openrouter/nope/x"] },
+      agents: {},
+    };
+
+    it("lists tiers with no in-scope candidate, only when scoped models are set", () => {
+      assert.deepEqual(
+        tiersWithoutCandidates(modelsConfig, [{ provider: "anthropic", id: "claude-haiku-5-5" }]),
+        ["gone"],
+      );
+      assert.deepEqual(tiersWithoutCandidates(modelsConfig, []), []);
+    });
+  });
+
+  describe("formatModelProvenance", () => {
+    it("names the tier and role for a role tier", () => {
+      assert.equal(
+        formatModelProvenance(
+          { model: "anthropic/claude-haiku-5-5", source: "role-tier", tier: "fast" },
+          "scout",
+        ),
+        'Model: anthropic/claude-haiku-5-5 (tier "fast" via role scout)',
+      );
+    });
+
+    it("says when the child falls back to pi's default", () => {
+      assert.equal(
+        formatModelProvenance({ model: null, source: "default", tier: null }, "scout"),
+        "Model: pi default (no session model)",
+      );
+    });
+  });
+
+  describe("formatModelMenu with models config", () => {
+    const scopedModels = [
+      { provider: "anthropic", id: "claude-haiku-5-5" },
+      { provider: "zai", id: "glm-5.3" },
+    ];
+    const sessionModel = { provider: "zai", id: "glm-5.3" };
+
+    it("lists tiers with what each resolves to and the role map", () => {
+      const menu = formatModelMenu({
+        sessionModel,
+        scopedModels,
+        modelsConfig: {
+          tiers: {
+            fast: ["anthropic/claude-haiku-5-5"],
+            gone: ["openrouter/nope/x"],
+          },
+          agents: { scout: "fast", reviewer: "anthropic/claude-opus-5-5" },
+        },
+      });
+      assert.match(menu, /Configured model tiers/);
+      assert.match(menu, /fast: now resolves to anthropic\/claude-haiku-5-5/);
+      assert.match(menu, /gone: no candidate in this session's scope/);
+      assert.match(
+        menu,
+        /Role map \(models\.agents\): scout → fast, reviewer → anthropic\/claude-opus-5-5/,
+      );
+    });
+
+    it("is unchanged when no models config is set", () => {
+      const base = formatModelMenu({ sessionModel, scopedModels });
+      assert.equal(formatModelMenu({ sessionModel, scopedModels, modelsConfig: null }), base);
+      assert.equal(
+        formatModelMenu({ sessionModel, scopedModels, modelsConfig: { tiers: {}, agents: {} } }),
+        base,
+      );
+      assert.doesNotMatch(base, /Configured model tiers/);
     });
   });
 

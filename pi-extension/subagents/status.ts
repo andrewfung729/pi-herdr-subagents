@@ -1,14 +1,11 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_FILE_NAME, getConfigPaths, readOptionalJsonFile } from "./config.ts";
 
 export const SNAPSHOT_STALLED_AFTER_MS = 60_000;
 export const DEFAULT_STATUS_LINE_LIMIT = 4;
 export const MAX_STATUS_NAME_LENGTH = 72;
 export const MAX_STATUS_LINE_LENGTH = 120;
 
-/** Sidecar config filename under the agent dir and project `.pi/`. */
-export const CONFIG_FILE_NAME = "herdr-subagents.json";
+export { CONFIG_FILE_NAME };
 
 export type SubagentStatusKind = "starting" | "active" | "waiting" | "stalled" | "running";
 export type SubagentStatusSource = "pi";
@@ -171,7 +168,7 @@ interface StatusConfigOverlay {
 
 function parseStatusConfigOverlay(rawConfig: unknown, source: string): StatusConfigOverlay {
   const config = requireObject(rawConfig, source, "root");
-  rejectUnsupportedKeys(config, ["status"], source, "root");
+  rejectUnsupportedKeys(config, ["status", "models"], source, "root");
   if (config.status === undefined) return {};
 
   const status = requireObject(config.status, source, "status");
@@ -181,34 +178,12 @@ function parseStatusConfigOverlay(rawConfig: unknown, source: string): StatusCon
   return { enabled: requireBoolean(status.enabled, source, "status.enabled") };
 }
 
-function readOptionalJsonFile(configPath: string): unknown | null {
-  let rawConfig: string;
-  try {
-    rawConfig = readFileSync(configPath, "utf8");
-  } catch (error) {
-    const errno = error as NodeJS.ErrnoException;
-    if (errno.code === "ENOENT") return null;
-    throw error;
-  }
-
-  try {
-    return JSON.parse(rawConfig) as unknown;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSON in subagent config ${configPath}: ${detail}`);
-  }
-}
-
 /**
  * Resolve status config: code defaults ← `~/.pi/agent/herdr-subagents.json`
  * ← `<cwd>/.pi/herdr-subagents.json` (project wins). Missing files are skipped.
  */
 export function loadStatusConfig(options: LoadStatusConfigOptions = {}): StatusConfig {
-  const agentDir = options.agentDir ?? getAgentDir();
-  const paths = [join(agentDir, CONFIG_FILE_NAME)];
-  if (options.cwd) {
-    paths.push(join(options.cwd, CONFIG_DIR_NAME, CONFIG_FILE_NAME));
-  }
+  const paths = getConfigPaths(options);
 
   let enabled = DEFAULT_STATUS_CONFIG.enabled;
   for (const configPath of paths) {

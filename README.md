@@ -56,7 +56,7 @@ Five things define this project as it stands. Each subsection is a capability yo
 ### Sub-agents run on pi, with pi's defaults
 
 - Every sub-agent process is pi — one executor everywhere.
-- Bundled agents omit `model:` and run on the spawning session's current model; spawn-time `model` parameters are validated against the session's scoped models (see [Model selection](#model-selection)).
+- Bundled agents omit `model:` and run on the spawning session's current model unless the user's `models.agents` config routes them to a tier or model; spawn-time `model` parameters accept tier names and are validated against the session's scoped models (see [Model selection](#model-selection)).
 - Web tools (`web_search`, `fetch_content`, `source_check`, `get_search_content`) are provided by the [pi-web-access](https://pi.dev/packages/pi-web-access) package.
 - Shell access is plain `bash`.
 - Custom agents are pi frontmatter only; role folders are configured with `AGENTS.md`.
@@ -129,24 +129,51 @@ If the reply arrives while the sub-agent is still mid-turn, it is absorbed into 
 | **researcher** | session model | `web_search`, `fetch_content`, `codemode` | Web research, synthesized into a sourced brief |
 | **worker** | session model | `read`, `write`, `edit`, `bash`, `web_search`, `fetch_content`, `codemode` + spawning | General implementer; may spawn `scout` and `researcher` |
 
-Bundled agents omit `model`, so they run on the spawning session's current model (see [Model selection](#model-selection)). Set `model:` in an override file to pin one. All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
+Bundled agents omit `model`, so by default they run on the spawning session's current model. A `models.agents` entry in the user config routes an agent to a tier or a concrete model instead (see [Model selection](#model-selection) and [Model tiers](#model-tiers)). Set `model:` in an override file to pin one. All three are autonomous (`auto-exit: true`) and carry their identity in the system prompt (`system-prompt: append`).
 
 ### Model selection
 
 Spawn-time model resolution, most explicit source first:
 
-1. **`model` parameter** on the `subagent` call — validated against the session's scoped models (`enabledModels`) when those are configured. An out-of-scope id never reaches the child: the spawn proceeds on the next source below and the tool result includes a warning saying so.
-2. **Agent `model:` pin** — a definition's frontmatter overrides the session default. Not scope-validated: the pin is a deliberate config choice owned by the user.
-3. **The spawning session's current model** — the default when neither of the above is set, so a sub-agent deterministically matches its caller instead of re-resolving pi's fresh-start default (which can differ: `enabledModels[0]` outranks the saved default model).
-4. **pi's default** — only when the spawning session has no active model.
+1. **`model` parameter** on the `subagent` call. A configured tier name (see [Model tiers](#model-tiers)) resolves to that tier's first usable candidate. A concrete id is validated against the session's scoped models (`enabledModels`) when those are configured. An out-of-scope id never reaches the child: the spawn proceeds on the next source below and the tool result includes a warning saying so.
+2. **Agent `model:` pin** — a definition's frontmatter overrides the sources below. Not scope-validated: the pin is a deliberate config choice owned by the user.
+3. **`models.agents` role map** — a user config entry that maps an agent name to a tier or a concrete ref. It is less specific than the agent file's own pin, so it only applies when the definition has no `model:`.
+4. **The spawning session's current model** — the default when none of the above is set, so a sub-agent deterministically matches its caller instead of re-resolving pi's fresh-start default (which can differ: `enabledModels[0]` outranks the saved default model).
+5. **pi's default** — only when the spawning session has no active model.
 
-`subagents_list` lists the exact usable ids in its "Model selection" section. Thinking levels still come from the agent's `thinking:` frontmatter; a `model: provider/id:level` suffix applies only when the definition doesn't pin `thinking:`.
+The spawn tool result starts with one line naming the choice, e.g. `Model: anthropic/claude-haiku-5-5 (tier "fast" via role scout)`. A rejected request that fell back also carries a warning on that result.
+
+`subagents_list` lists the exact usable ids, the configured tiers with what each resolves to right now, and the role map in its "Model selection" section. Thinking levels still come from the agent's `thinking:` frontmatter; a `model: provider/id:level` suffix applies only when the definition doesn't pin `thinking:`.
+
+### Model tiers
+
+Tiers let you name a model once and route agents to it, without editing agent files when you switch providers. Configure them in `~/.pi/agent/herdr-subagents.json` or `<cwd>/.pi/herdr-subagents.json` (project wins per key: a project `tiers.fast` replaces the global `tiers.fast`, and other keys are kept):
+
+```json
+{
+  "models": {
+    "tiers": {
+      "fast": ["anthropic/claude-haiku-5-5"],
+      "strong": ["anthropic/claude-opus-5-5"]
+    },
+    "agents": { "scout": "fast", "researcher": "fast", "worker": "strong" }
+  }
+}
+```
+
+- **Tier names** match `[A-Za-z0-9_-]+`. Each candidate is a `provider/id` ref, optionally suffixed `:<thinking>`.
+- **Picking a candidate:** candidates outside the session's scoped models are dropped (when scoped models are configured). The first remaining candidate on the session model's provider wins, else the first remaining one. The thinking suffix is kept, but the agent's `thinking:` frontmatter still takes precedence.
+- **`agents`** values are a tier name or a concrete `provider/id` ref. Unknown agent names are fine (custom agents may come later).
+- **Multiple providers:** a candidate list may mix providers. The first usable candidate on the session model's provider is preferred, so one config works across sessions.
+- **Validation:** the config is re-read at every spawn, so edits apply without a restart. Any structural problem (bad tier name, empty or non-`provider/id` candidate list, an `agents` value that names an undefined tier, an unknown key under `models`) makes the whole `models` section ignored. Session start reports the errors as a warning, and the spawn result carries a `Models config ignored: …` note. Invalid JSON or an unreadable file is handled the same way: it never stops spawning or `subagents_list`. The status widget config is unaffected. At session start, each tier with no candidate in the session's scoped models is reported too.
+- **No registry checks:** tiers are not checked against API keys or the provider registry.
+- **Resumed sub-agents** keep the concrete model they were launched with; tiers are not re-resolved on resume.
 
 ### Virtual models
 
 Virtual model ids (e.g. a router-backed `provider/auto`) only resolve in processes that loaded the extension that registered them. Restricted children carry **installed pi packages** (see [Tool access control](#tool-access-control)), so a virtual model whose registrar is an installed package works in the child. A bare parent `-e` router extension that is **not** an installed package is **not** discovered under `--no-extensions` and is **not** carried — the child can hit `Model "..." not found` and fatal-stall.
 
-Suggested pins while virtual-model carry of bare `-e` routers is not implemented:
+Suggested pins while virtual-model carry of bare `-e` routers is not implemented. A tier (see [Model tiers](#model-tiers)) whose candidates are physical ids, mapped to the agent in `models.agents`, gives the same routing without editing agent files:
 
 | Role | Suggested model | Why |
 | ---- | --------------- | --- |

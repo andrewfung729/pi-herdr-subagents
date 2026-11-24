@@ -1,5 +1,20 @@
 {
   "status": {
     "enabled": true
+  },
+  "models": {
+    "tiers": {
+      "fast": [
+        "deepseek/deepseek-flash:high"
+      ],
+      "strong": [
+        "claude/claude-opus-5-5:medium"
+      ]
+    },
+    "agents": {
+      "scout": "fast",
+      "researcher": "fast",
+      "worker": "strong"
+    }
   }
 }
