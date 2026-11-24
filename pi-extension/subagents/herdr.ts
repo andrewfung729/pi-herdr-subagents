@@ -1,15 +1,24 @@
 /**
- * herdr surface layer — the only terminal multiplexer this extension supports.
+ * Terminal surface layer. Two backends, one API:
  *
- * Everything the extension does to a pane goes through the small API in this
- * file: create/split a pane, type a command into it, read its screen, close
- * it, and poll for exit. Keeping the herdr CLI calls isolated here means
- * index.ts stays testable without a multiplexer running.
+ * - **Herdr app**: `herdr-app do pane.split` plus `hc` for send/read/kill.
+ *   Active when `HC_TERMINAL_ID` is set and this terminal has a pane in the
+ *   app. See `herdr-app.ts`.
+ * - **herdr** (the TUI): `herdr pane split|run|read|close`. Active when
+ *   `HERDR_ENV=1` and `herdr pane current` finds this pane. Pane ids are
+ *   workspace-qualified (`w1:p3`).
  *
- * Panes are identified by herdr workspace-qualified pane ids (e.g. `w1:p1`).
- * A split can target the parent pi pane (`--current`, resolved from
- * HERDR_PANE_ID) or an explicit pane id, so callers can build a stable
- * two-column layout with subagents stacked vertically on the right.
+ * When both are set, herdr is checked first: a herdr server started from a
+ * Herdr app terminal passes `HC_TERMINAL_ID` to every herdr pane, and those
+ * panes must split inside herdr. If herdr cannot confirm the pane (a leaked
+ * `HERDR_ENV`), the Herdr app is checked next.
+ *
+ * Everything the extension does to a pane goes through this file: create/split
+ * a pane, type a command into it, read its screen, close it, and poll for
+ * exit. index.ts stays free of CLI details.
+ *
+ * A split targets the parent pi pane, or an explicit pane, so callers can
+ * build a stable two-column layout with subagents stacked on the right.
  *
  * Ported from the tmux surface of amosblomqvist/pi-interactive-subagents.
  */
@@ -18,8 +27,24 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import {
+  appTerminalStateAsync,
+  closeAppSurface,
+  createAppSurfaceSplit,
+  currentAppPane,
+  decodeAppSurface,
+  handOffAppLaunch,
+  isPendingAppLaunch,
+  readAppScreen,
+  readAppScreenAsync,
+  readHerdrAppVersionStatus,
+  sendAppCommand,
+  sendAppCommandAsync,
+} from "./herdr-app.ts";
 
 const execFileAsync = promisify(execFile);
+
+export type SurfaceBackend = "herdr" | "herdr-app";
 
 // ── Availability ──
 
@@ -40,16 +65,35 @@ export type HerdrRuntimeStatus =
       compatible: false;
       message: string;
       version?: string;
+      backend?: SurfaceBackend;
     }
   | {
       kind: "supported" | "untested";
       compatible: true;
       message?: string;
       version: string;
+      backend?: SurfaceBackend;
     };
 
 const commandAvailability = new Map<string, boolean>();
 let installedHerdrStatus: HerdrRuntimeStatus | undefined;
+let runtimeStatusCache: { key: string; status: HerdrRuntimeStatus } | undefined;
+
+/**
+ * Surfaces the environment points at, in the order they are checked. The
+ * runtime check confirms the pane before a backend is used.
+ */
+export function surfaceCandidatesFromEnv(env: NodeJS.ProcessEnv): SurfaceBackend[] {
+  const candidates: SurfaceBackend[] = [];
+  if (env.HERDR_ENV === "1") candidates.push("herdr");
+  if (env.HC_TERMINAL_ID) candidates.push("herdr-app");
+  return candidates;
+}
+
+/** The first surface the environment points at, before any CLI check. */
+export function surfaceBackendFromEnv(env: NodeJS.ProcessEnv): SurfaceBackend | "outside" {
+  return surfaceCandidatesFromEnv(env)[0] ?? "outside";
+}
 
 function hasCommand(command: string): boolean {
   if (commandAvailability.has(command)) {
@@ -127,7 +171,7 @@ function getInstalledHerdrStatus(): HerdrRuntimeStatus {
 
   try {
     installedHerdrStatus = classifyHerdrVersionOutput(
-      execFileSync("herdr", ["--version"], { encoding: "utf8" }),
+      execFileSync("herdr", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
     );
   } catch (error: any) {
     installedHerdrStatus = {
@@ -139,23 +183,115 @@ function getInstalledHerdrStatus(): HerdrRuntimeStatus {
   return installedHerdrStatus;
 }
 
-/** Inspect the Herdr environment and installed CLI version once per process. */
-export function getHerdrRuntimeStatus(): HerdrRuntimeStatus {
-  if (process.env.HERDR_ENV !== "1") {
+function runtimeCacheKey(): string {
+  return [process.env.HERDR_ENV, process.env.HERDR_PANE_ID, process.env.HC_TERMINAL_ID]
+    .map((value) => value ?? "")
+    .join("\0");
+}
+
+function getHerdrAppRuntimeStatus(): HerdrRuntimeStatus {
+  if (!hasCommand("herdr-app") || !hasCommand("hc")) {
     return {
-      kind: "outside-herdr",
+      kind: "missing",
       compatible: false,
-      message: "Subagents require pi to run inside a Herdr-managed pane (HERDR_ENV=1).",
+      backend: "herdr-app",
+      message: "Herdr app subagents need both the `herdr-app` and `hc` CLIs on PATH.",
     };
   }
+  // No pane for this terminal (window closed, a pane-less `hc run` terminal,
+  // or a leaked HC_TERMINAL_ID): this process is not in the Herdr app.
+  const pane = currentAppPane();
+  if ("error" in pane) {
+    return { kind: "outside-herdr", compatible: false, backend: "herdr-app", message: pane.error };
+  }
+  const version = readHerdrAppVersionStatus();
+  if (version.kind === "unsupported") {
+    return {
+      kind: "unsupported",
+      compatible: false,
+      backend: "herdr-app",
+      version: version.version,
+      message: version.message,
+    };
+  }
+  return {
+    kind: version.kind,
+    compatible: true,
+    backend: "herdr-app",
+    version: version.version,
+    ...(version.message ? { message: version.message } : {}),
+  };
+}
+
+/**
+ * Classify a failed `herdr pane current --current`. No server, or no such
+ * pane, means this process is not in a herdr pane. Anything else (an older
+ * CLI without the command, say) is not evidence either way.
+ */
+export function herdrPaneCheckSaysOutside(error: unknown): boolean {
+  const err = error as { message?: unknown; stdout?: unknown; stderr?: unknown } | null;
+  const text = [err?.message, err?.stdout, err?.stderr]
+    .filter((part): part is string => typeof part === "string")
+    .join("\n");
+  return /server_not_running|pane_not_found|no current pane/.test(text);
+}
+
+function getHerdrTuiRuntimeStatus(): HerdrRuntimeStatus {
   if (!hasCommand("herdr")) {
     return {
       kind: "missing",
       compatible: false,
+      backend: "herdr",
       message: "The herdr CLI is not available on PATH.",
     };
   }
-  return getInstalledHerdrStatus();
+  const installed = { ...getInstalledHerdrStatus(), backend: "herdr" as const };
+  if (!installed.compatible) return installed;
+  try {
+    herdr(["pane", "current", "--current"]);
+  } catch (error) {
+    if (herdrPaneCheckSaysOutside(error)) {
+      return {
+        kind: "outside-herdr",
+        compatible: false,
+        backend: "herdr",
+        message: "HERDR_ENV=1 is set, but this process is not in a herdr pane.",
+      };
+    }
+  }
+  return installed;
+}
+
+/**
+ * Inspect the terminal surface once per environment. Each candidate from
+ * `surfaceCandidatesFromEnv` is checked in turn; one whose CLI is missing or
+ * whose pane cannot be found is skipped. When none is usable, the first
+ * failure is returned (`outside-herdr` or `missing`, so no tools register).
+ */
+export function getHerdrRuntimeStatus(): HerdrRuntimeStatus {
+  const key = runtimeCacheKey();
+  if (runtimeStatusCache?.key === key) return runtimeStatusCache.status;
+
+  let status: HerdrRuntimeStatus | undefined;
+  let firstSkipped: HerdrRuntimeStatus | undefined;
+  for (const backend of surfaceCandidatesFromEnv(process.env)) {
+    const candidate = backend === "herdr" ? getHerdrTuiRuntimeStatus() : getHerdrAppRuntimeStatus();
+    if (candidate.kind === "outside-herdr" || candidate.kind === "missing") {
+      firstSkipped ??= candidate;
+      continue;
+    }
+    status = candidate;
+    break;
+  }
+  status ??= firstSkipped ?? {
+    kind: "outside-herdr",
+    compatible: false,
+    message:
+      "Subagents require pi to run inside the Herdr app (HC_TERMINAL_ID) or herdr (HERDR_ENV=1).",
+  };
+
+  runtimeStatusCache = { key, status };
+  return status;
 }
 
 /** True when the current Herdr runtime is present and not known to be incompatible. */
@@ -168,14 +304,18 @@ export function isMuxAvailable(): boolean {
 }
 
 export function muxSetupHint(): string {
-  return `Start pi inside Herdr >=${HERDR_MIN_VERSION} (https://herdr.dev) — \`brew install herdr\`, then run \`herdr\` and start pi in a pane.`;
+  return (
+    "Start pi in a Herdr app pane (`herdr-app`, with `hc` on PATH), " +
+    `or inside herdr >=${HERDR_MIN_VERSION} (\`herdr\`, https://herdr.dev).`
+  );
 }
 
-function requireHerdr(): void {
+function requireSurface(): SurfaceBackend {
   const status = getHerdrRuntimeStatus();
-  if (!status.compatible) {
-    throw new Error(`${status.message} ${muxSetupHint()}`);
+  if (!status.compatible || !status.backend) {
+    throw new Error(`${status.message ?? "No terminal surface available."} ${muxSetupHint()}`);
   }
+  return status.backend;
 }
 
 export const __herdrVersionTest__ = { classifyHerdrVersionOutput, parseHerdrVersion };
@@ -195,7 +335,7 @@ export function shellEscape(s: string): string {
  * detect a destroyed pane via `isPaneGoneError`.
  */
 function herdr(args: string[]): string {
-  return execFileSync("herdr", args, { encoding: "utf8" });
+  return execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /** Run `herdr` asynchronously. */
@@ -221,7 +361,11 @@ function isPaneGoneError(error: any): boolean {
     typeof error?.stdout === "string" ? error.stdout : "",
     typeof error?.stderr === "string" ? error.stderr : "",
   ].join(" ");
-  return text.includes("pane_not_found");
+  return (
+    text.includes("pane_not_found") ||
+    text.includes("no pane ") ||
+    /"kind"\s*:\s*"not_found"/.test(text)
+  );
 }
 
 // ── Surface primitives ──
@@ -232,28 +376,47 @@ function isPaneGoneError(error: any): boolean {
  * process cwd) and focus kept on the parent. Later panes can use
  * `createSurfaceSplit(..., "down", existingSurface)` to remain in the same
  * right-hand column. The pane is renamed to the subagent name (best-effort) so
- * the herdr sidebar shows a useful label.
+ * the sidebar shows a useful label.
  *
- * Returns the new pane id (e.g. `w1:p3`).
+ * Returns the new surface id (`w1:p3` on herdr, `herdr-app|<pane>|<terminal>`
+ * in the Herdr app).
  */
-export function createSurface(name: string, cwd?: string): string {
-  return createSurfaceSplit(name, "right", undefined, cwd);
+export function createSurface(name: string, cwd?: string, options?: SurfaceOptions): string {
+  return createSurfaceSplit(name, "right", undefined, cwd, options);
+}
+
+export interface SurfaceOptions {
+  /**
+   * The pane will run exactly one `sendLongCommand` script. In the Herdr app
+   * the pane starts a launch bootstrap (`pane.split --argv`) and the script is
+   * handed over as a file, with no typing and no shell-ready delay. herdr
+   * ignores it and opens a shell as usual.
+   */
+  launch?: boolean;
+}
+
+/** Whether a command typed into `surface` must wait for shell startup. */
+export function surfaceNeedsShellReadyDelay(surface: string): boolean {
+  return !isPendingAppLaunch(surface);
 }
 
 /**
  * Create a new split in the given direction, optionally off a specific pane.
- * herdr only supports `right` and `down` splits. Without `fromSurface`, the
- * split targets the calling pane (`--current`).
- * Returns the new pane id (e.g. `w1:p3`).
+ * Both backends support `right` and `down`. Without `fromSurface`, the split
+ * targets the calling pane. On herdr, `cwd` is the new pane's directory; the
+ * Herdr app inherits the source pane's directory (`pane.split` has no folder).
+ * Returns the new surface id.
  */
 export function createSurfaceSplit(
   name: string,
   direction: "right" | "down",
   fromSurface?: string,
   cwd: string = process.cwd(),
+  options?: SurfaceOptions,
 ): string {
-  void name;
-  requireHerdr();
+  if (requireSurface() === "herdr-app") {
+    return createAppSurfaceSplit(name, direction, fromSurface, options);
+  }
 
   const args = [
     "pane",
@@ -290,8 +453,23 @@ export function createSurfaceSplit(
  * bracketed-paste mode (equivalent to tmux send-keys -l + Enter).
  */
 export function sendCommand(surface: string, command: string): void {
-  requireHerdr();
+  if (requireSurface() === "herdr-app") {
+    sendAppCommand(surface, command);
+    return;
+  }
   herdr(["pane", "run", surface, command]);
+}
+
+/**
+ * Async `sendCommand`. Use it from tool handlers: `hc send` can wait up to
+ * 60 s for a person's unfinished draft, and this keeps the event loop free.
+ */
+export async function sendCommandAsync(surface: string, command: string): Promise<void> {
+  if (requireSurface() === "herdr-app") {
+    await sendAppCommandAsync(surface, command);
+    return;
+  }
+  await herdrAsync(["pane", "run", surface, command]);
 }
 
 /**
@@ -328,7 +506,9 @@ export function sendLongCommand(
   writeFileSync(scriptPath, `${scriptParts.join("\n")}\n`, {
     mode: 0o755,
   });
-  sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
+  if (!handOffAppLaunch(surface, scriptPath)) {
+    sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
+  }
   return scriptPath;
 }
 
@@ -348,7 +528,7 @@ const HERDR_READ_FLOOR_LINES = 200;
  * then keeps the last `lines` joined lines in JS.
  */
 export function readScreen(surface: string, lines = 50): string {
-  requireHerdr();
+  if (requireSurface() === "herdr-app") return readAppScreen(surface, lines);
   const text = herdr([
     "pane",
     "read",
@@ -365,7 +545,7 @@ export function readScreen(surface: string, lines = 50): string {
  * Read the screen contents of a pane (async).
  */
 export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
-  requireHerdr();
+  if (requireSurface() === "herdr-app") return readAppScreenAsync(surface, lines);
   const text = await herdrAsync([
     "pane",
     "read",
@@ -390,7 +570,10 @@ function tailLines(text: string, lines: number): string {
  * herdr UI, or torn down with its tab) counts as closed.
  */
 export function closeSurface(surface: string): void {
-  requireHerdr();
+  if (requireSurface() === "herdr-app") {
+    closeAppSurface(surface);
+    return;
+  }
   try {
     herdr(["pane", "close", surface]);
   } catch (error) {
@@ -430,6 +613,24 @@ function interpretExitSidecar(data: any): PollResult {
   return { reason: "done", exitCode: 0 };
 }
 
+/** Consume the `.exit` sidecar if it exists. */
+function takeExitSidecar(sessionFile: string | undefined): PollResult | null {
+  if (!sessionFile) return null;
+  try {
+    const exitFile = `${sessionFile}.exit`;
+    if (existsSync(exitFile)) {
+      const data = JSON.parse(readFileSync(exitFile, "utf-8"));
+      rmSync(exitFile, { force: true });
+      return interpretExitSidecar(data);
+    }
+  } catch {}
+  return null;
+}
+
+const PANE_CLOSED_MESSAGE = "Subagent pane closed before completion (pane_not_found).";
+const TERMINAL_REPLACED_MESSAGE =
+  "Subagent terminal was replaced by a fresh shell (herdr-core restarted) before completion (pane_not_found).";
+
 export const __pollForExitTest__ = { interpretExitSidecar };
 
 /**
@@ -454,16 +655,8 @@ export async function pollForExit(
     }
 
     // Fast path: check for .exit sidecar file (written by the error path)
-    if (options.sessionFile) {
-      try {
-        const exitFile = `${options.sessionFile}.exit`;
-        if (existsSync(exitFile)) {
-          const data = JSON.parse(readFileSync(exitFile, "utf-8"));
-          rmSync(exitFile, { force: true });
-          return interpretExitSidecar(data);
-        }
-      } catch {}
-    }
+    const early = takeExitSidecar(options.sessionFile);
+    if (early) return early;
 
     // Slow path: read terminal screen for sentinel (crash detection)
     try {
@@ -472,27 +665,30 @@ export async function pollForExit(
       if (match) {
         return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
       }
+      // Herdr app keeps a finished terminal's screen readable, so reads do
+      // not fail when the pane goes. A gone or replaced terminal with no
+      // sentinel is the pane-gone case.
+      if (decodeAppSurface(surface)) {
+        const state = await appTerminalStateAsync(surface);
+        if (state !== "live") {
+          const late = takeExitSidecar(options.sessionFile);
+          if (late) return late;
+          return {
+            reason: "error",
+            exitCode: 1,
+            errorMessage: state === "replaced" ? TERMINAL_REPLACED_MESSAGE : PANE_CLOSED_MESSAGE,
+          };
+        }
+      }
     } catch (error) {
       // Surface may have been destroyed — check if .exit file appeared in the meantime
-      if (options.sessionFile) {
-        try {
-          const exitFile = `${options.sessionFile}.exit`;
-          if (existsSync(exitFile)) {
-            const data = JSON.parse(readFileSync(exitFile, "utf-8"));
-            rmSync(exitFile, { force: true });
-            return interpretExitSidecar(data);
-          }
-        } catch {}
-      }
+      const late = takeExitSidecar(options.sessionFile);
+      if (late) return late;
       if (isPaneGoneError(error)) {
-        // The pane was destroyed without a sentinel (closed by the user from
-        // the herdr UI, a herdr restart, or a fatal-stall escalation). Return
-        // instead of looping forever — the parent must be woken either way.
-        return {
-          reason: "error",
-          exitCode: 1,
-          errorMessage: "Subagent pane closed before completion (pane_not_found).",
-        };
+        // The pane was destroyed without a sentinel (closed by the user, a
+        // multiplexer restart, or a fatal-stall escalation). Return instead of
+        // looping forever — the parent must be woken either way.
+        return { reason: "error", exitCode: 1, errorMessage: PANE_CLOSED_MESSAGE };
       }
     }
 

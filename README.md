@@ -1,8 +1,8 @@
 # pi-herdr-subagents
 
-Async subagents for [pi](https://github.com/earendil-works/pi), running in [herdr](https://herdr.dev) panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/earendil-works/pi), running in [Herdr app](https://herdr.dev) splits or [herdr](https://herdr.dev) panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**herdr-only fork.** This project runs the async subagent workflow in [herdr](https://herdr.dev) panes: every terminal surface operation goes through the `herdr` CLI, the parent wakes once per batch of sub-agents rather than per completion, and startup failures surface as results instead of hangs. It descends from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblomqvist/pi-interactive-subagents) (tmux-only), itself forked from [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) — see [Acknowledgements](#acknowledgements). [This fork](#this-fork) describes the system as it stands today.
+**Herdr app first, herdr too.** This project runs the async subagent workflow in Herdr app splits driven by `herdr-app` and `hc`, or in herdr panes: the parent wakes once per batch of sub-agents rather than per completion, and startup failures surface as results instead of hangs. It descends from [amosblomqvist/pi-interactive-subagents](https://github.com/amosblomqvist/pi-interactive-subagents) (tmux-only), itself forked from [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents) — see [Acknowledgements](#acknowledgements). [This fork](#this-fork) describes the system as it stands today.
 
 ## How it works
 
@@ -17,9 +17,9 @@ Async subagents for [pi](https://github.com/earendil-works/pi), running in [herd
 
 Spawn several in parallel — they run concurrently and display results independently as each finishes, then steer the parent once when the autonomous batch is complete.
 
-Each spawned pane is renamed to the sub-agent's name (best-effort via `herdr pane rename`), so the herdr sidebar and tab strip show useful labels.
+Each spawned pane is renamed to the sub-agent's name (best-effort via `herdr-app do pane.rename` or `herdr pane rename`), so the sidebar and tab strip show useful labels.
 
-If your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
+In the Herdr app, sub-agent panes need no shell-ready delay: the launch script is handed to the pane as a file (see [Herdr app and herdr](#herdr-app-and-herdr)). On herdr, the launch command is typed into a fresh shell; if your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
 
 ```bash
 export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
@@ -29,13 +29,19 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 
 Five things define this project as it stands. Each subsection is a capability you can rely on; anything not covered here works as described in the rest of this README.
 
-### Fully herdr-native
+### Herdr app and herdr
 
-- Every terminal operation goes through the `herdr` CLI — `herdr pane split|run|read|close`, wrapped in `pi-extension/subagents/herdr.ts`.
-- Stable two-column layout: the first sub-agent splits right off the parent pane; further concurrent sub-agents stack downward in that right-hand subtree. Herdr controls the ratios; adjust with `herdr pane resize`.
-- Screen reads use herdr's `recent-unwrapped` snapshot: a 200-rendered-row window, tail-sliced in JS. Output on an alternate screen that never enters the terminal stream is unrecoverable — bounded, like tmux scrollback.
-- Panes carry workspace-qualified ids (`w1:p3`) and are renamed to the sub-agent's name via `herdr pane rename`, so the herdr sidebar and tab strip stay legible.
-- herdr is a hard dependency: the tools and `/subagent` register only inside a herdr pane. The installed CLI is classified once per process — `>=0.8.2` required, tested with `0.9.5`, `>=1.0.0` runs with an untested-compatibility warning, and a missing or incompatible runtime raises an error notification. The bundled skill (`skills/herdr/`) is pinned to 0.9.5 and verified by `pnpm run check:herdr-skill`.
+- Terminal operations go through one surface API in `pi-extension/subagents/herdr.ts`. In the Herdr app it is `herdr-app do pane.split|close|rename|focus` plus `hc send|read|get|kill|rm` (`pi-extension/subagents/herdr-app.ts`). In the herdr TUI it is `herdr pane split|run|read|close`.
+- **Which surface.** Each surface the environment points at is checked, and the pane must be confirmed before it is used. herdr (`HERDR_ENV=1`) is checked first: `herdr pane current --current` must find this pane. A herdr server started from a Herdr app terminal passes `HC_TERMINAL_ID` to every herdr pane, and those panes must split inside herdr. Then the Herdr app (`HC_TERMINAL_ID`): `herdr-app ls` must show a pane for this terminal. A leaked `HERDR_ENV` with no herdr server or pane falls through to the Herdr app.
+- **Tools register only on a confirmed pane.** When neither surface confirms its pane (a regular terminal, the Herdr app window closed, a pane-less `hc run` terminal, leaked environment variables), the extension registers no tools and no `/subagent` command. A confirmed surface with an incompatible version registers nothing either and raises an error notification.
+- **Launch panes (Herdr app).** A sub-agent pane is created with `pane.split --argv` running a small bootstrap instead of a shell. The parent writes the launch script, then hands it over by atomically dropping a file under `$TMPDIR/pi-herdr-subagents/`. The bootstrap runs it through your login shell (`$SHELL -lic`, or `bash` for shells such as fish and nu), so the child gets the same environment as a typed command. Nothing is typed into the pane at launch, so there is no shell-ready delay and no wait for a draft. When the script ends, its program exits, the app closes the pane, and the screen stays readable through `hc read`. A bootstrap whose handoff never arrives exits after 10 minutes.
+- Stable two-column layout on either surface: the first sub-agent splits right off the parent pane; further concurrent sub-agents stack downward in that right-hand subtree. Focus stays where it was; if the Herdr app moves focus anyway, it is put back. On herdr, adjust ratios with `herdr pane resize`.
+- **Screen reads.** The Herdr app uses `hc read --json --lines 200`, tail-sliced in JS. While the program is `working`, `blocked` or `error`, hc returns only the visible screen (no history); the completion sentinel is still on screen when it matters. herdr uses the `recent-unwrapped` snapshot: a 200-rendered-row window, tail-sliced in JS. Output on an alternate screen that never enters the terminal stream is unrecoverable on either surface.
+- **Steering (Herdr app).** `subagent_message` uses `hc send` asynchronously. hc waits up to 60 s for a person's unfinished draft in that pane, and the parent keeps running meanwhile. A child blocked on a permission prompt or question refuses the send; the error says to answer it in its pane.
+- **Pane ids.** Herdr app surfaces carry the pane id, the core terminal address, the program's pid at creation, and the launch token. herdr panes carry workspace-qualified ids (`w1:p3`). Either way the pane is renamed to the sub-agent's name.
+- **Versions.** The Herdr app needs `herdr-app` >=0.1.17 and `hc` >=0.1.22 on PATH (launch panes rely on `pane.split --argv` and hc's exit codes); a newer minor or major runs with an untested-compatibility warning. The herdr CLI is classified once per process: `>=0.8.2` required, tested with `0.9.5`, `>=1.0.0` runs with an untested-compatibility warning.
+- **Skills.** `skills/herdr-app/` points agents at `herdr-app --skill` and `hc --skill`, which always match the installed version. `skills/herdr/` is pinned to herdr 0.9.5 and verified by `pnpm run check:herdr-skill`.
+- **Cleanup and lost panes (Herdr app).** Herdr app splits inherit the source pane's directory; the launch script still `cd`s to the requested cwd. Closing a pane does not always end the core terminal immediately, so cleanup also runs `hc kill`, then `hc rm` so finished terminals do not pile up in `hc ls --all`. A terminal that is finished or gone with no completion sentinel is reported as `Subagent pane closed before completion`. After a herdr-core crash, a kept terminal comes back as a fresh shell at the same address; the pid differs from the one recorded at creation, and the sub-agent is reported as `Subagent terminal was replaced by a fresh shell` instead of waiting forever.
 
 ### One wake-up per batch
 
@@ -59,18 +65,18 @@ Five things define this project as it stands. Each subsection is a capability yo
 
 - pnpm workspace on the `@earendil-works/*` packages.
 - `pnpm check` — Biome lint/format plus `tsgo` strict typecheck — enforced by a husky pre-commit hook.
-- Three-tier tests: unit (`pnpm test`), herdr surface (`pnpm run test:surface`), full lifecycle (`pnpm run test:integration`).
+- Three-tier tests: unit (`pnpm test`), surface (`pnpm run test:surface`, Herdr app or herdr), full lifecycle (`pnpm run test:integration`).
 - `pnpm run check:herdr-skill` verifies the bundled skill against the pinned herdr release.
 
 See [Development](#development) for the commands.
 
 ## Tools
 
-The extension registers its tools and `/subagent` command only when Pi starts inside a herdr pane and the `herdr` CLI is available. In a regular terminal, the package may still be loaded by Pi, but it contributes no tools or commands.
+The extension registers its tools and `/subagent` command only when Pi starts in a confirmed Herdr app pane (`HC_TERMINAL_ID`, with `herdr-app` and `hc`, and `herdr-app ls` shows this terminal's pane) or herdr pane (`HERDR_ENV=1`, the `herdr` CLI, and `herdr pane current` finds this pane). Anywhere else, including leaked environment variables, the package may still be loaded by Pi, but it contributes no tools or commands.
 
 | Tool | Description |
 | --- | --- |
-| `subagent` | Spawn a sub-agent in a dedicated herdr pane (async). Model-only — not callable from codemode scripts |
+| `subagent` | Spawn a sub-agent in a dedicated Herdr app or herdr pane (async). Model-only — not callable from codemode scripts |
 | `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished. Model-only |
 | `subagents_list` | List available agent definitions plus the MCP servers a sub-agent can be given. Model-only |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply. Model-only |
@@ -102,7 +108,7 @@ subagent({ agent: "worker", name: "dark-mode", task: "Implement the dark mode to
 subagent_message({ name: "scout", message: "Also check the auth middleware" });
 ```
 
-- **Running** — the message is typed into the live pane (newlines flattened, submitted via `herdr pane run`) and picked up at the next turn boundary. The call returns immediately; the eventual completion still arrives as a steer message.
+- **Running** — the message is typed into the live pane (newlines flattened, submitted via `hc send` or `herdr pane run`, asynchronously) and picked up at the next turn boundary. The call returns immediately; the eventual completion still arrives as a steer message.
 - **Finished** — the session is resumed with the message as the follow-up task, like a fresh spawn: fire-and-forget, always autonomous, result steered back later. The resumed run reclaims its original name.
 
 Every spawn records name → session file in `artifacts/<sessionId>/subagent-registry.json`, so names stay addressable across pi restarts. A nested sub-agent that spawns children gets its own registry keyed by its own session id. Resume is refused with a clear error (listing known names) if the name isn't registered, the session file is gone, or the session predates sandboxed resume.
@@ -289,20 +295,20 @@ Missing files are fine — built-in defaults apply (`status.enabled: true`). Pac
 
 A sub-agent whose `pi` process fails before its agent loop starts (missing provider API key, unknown model, a launch script that dies instantly) never fires `agent_start`/`agent_end`, so it would otherwise sit at its interactive prompt forever and the parent would wait forever on a silent "stalled" status. The watcher escalates this case: when an autonomous sub-agent has been stalled at startup for 60 seconds (`FATAL_STALL_AFTER_SECONDS`) with no agent activity ever recorded, it reads the pane screen, extracts the error text (e.g. `Error: No API key found for <provider>.`), synthesizes the child's `.exit` error sidecar, closes the pane, and delivers a normal failure result (`Sub-agent "x" failed (provider/agent error)` with the underlying message) to the parent. Interactive sub-agents are exempt — the user drives those panes directly.
 
-If your shell startup is legitimately slower than the threshold (e.g. heavy `direnv` hooks in the child cwd), raise `PI_SUBAGENT_SHELL_READY_DELAY_MS` so the launch command is sent later, or spawn the sub-agent with a working environment. A pane that disappears mid-run (closed from the herdr UI, or a herdr restart) is reported to the parent as `Subagent pane closed before completion` instead of hanging the wait.
+On herdr, if your shell startup is legitimately slower than the threshold (e.g. heavy `direnv` hooks in the child cwd), raise `PI_SUBAGENT_SHELL_READY_DELAY_MS` so the launch command is sent later, or spawn the sub-agent with a working environment. Herdr app launch panes do not depend on this delay. A pane that disappears mid-run (closed from the UI, a multiplexer restart, or a herdr-core crash that replaced the terminal) is reported to the parent as an error instead of hanging the wait.
 
 ## Requirements
 
 - [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`) **>= 0.99** — required for built-in `codemode` and tool `exposure` (peer dependency floor)
-- [herdr](https://herdr.dev) >=0.8.2 — tested with 0.9.5; versions >=1.0.0 produce an untested-compatibility warning
+- The [Herdr app](https://herdr.dev), with `herdr-app` >=0.1.17 and `hc` >=0.1.22 on PATH (tested with 0.1.17 / 0.1.22; a newer minor produces an untested-compatibility warning)
+- or [herdr](https://herdr.dev) >=0.8.2 — tested with 0.9.5; versions >=1.0.0 produce an untested-compatibility warning
 
 ```bash
-herdr          # start or attach to the persistent session
-# then, inside a pane:
+# open the Herdr app (or run `herdr`), then inside a pane:
 pi
 ```
 
-The first subagent pane is created with `herdr pane split --current --direction right --cwd <session-cwd> --no-focus` (the parent session's working directory, so a hosted pi process still lands the pane in the user's project). Additional concurrent panes target the newest subagent pane with `--direction down`, keeping the parent on the left and the subagent stack on the right without stealing focus.
+In the Herdr app, the first subagent pane is created with `herdr-app do pane.split --direction right --pane <caller> --argv <launch bootstrap>`; it starts in the source pane's directory and the launch script `cd`s to the session cwd. On herdr it is `herdr pane split --current --direction right --cwd <session-cwd> --no-focus` (the parent session's working directory, so a hosted pi process still lands the pane in the user's project). Additional concurrent panes target the newest subagent pane with `--direction down`, keeping the parent on the left and the subagent stack on the right without stealing focus.
 
 ## Development
 
@@ -311,8 +317,8 @@ pnpm install
 pnpm check                    # biome (lint + format) + tsgo typecheck
 pnpm test                     # unit tests (no multiplexer needed)
 pnpm run check:herdr-skill    # compare the bundled skill with pinned Herdr 0.9.5
-pnpm run test:surface         # herdr surface tests (run inside herdr)
-pnpm run test:integration     # full lifecycle tests (real LLM calls, run inside herdr)
+pnpm run test:surface         # surface tests (run in a Herdr app or herdr pane)
+pnpm run test:integration     # full lifecycle tests (real LLM calls, run in a Herdr app or herdr pane)
 ```
 
 Checks follow the pi monorepo's setup: [Biome](https://biomejs.dev) for lint/format and the native TypeScript compiler (`tsgo`, strict mode) for typechecking, wired into a husky pre-commit hook.

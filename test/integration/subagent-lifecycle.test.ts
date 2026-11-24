@@ -8,7 +8,7 @@
  * Costs: ~$0.01-0.05 per test run (haiku).
  * Duration: ~30-90s per test.
  *
- * Run inside herdr:
+ * Run inside herdr or the Herdr app:
  *   herdr 'npm run test:integration'
  *
  * Configuration:
@@ -38,8 +38,8 @@ import {
 const backends = getAvailableBackends();
 
 if (backends.length === 0) {
-  console.log("⚠️  herdr is not available — skipping subagent lifecycle integration tests");
-  console.log("   Run inside herdr (HERDR_ENV=1) to enable these tests.");
+  console.log("⚠️  no herdr or herdr-app surface — skipping subagent lifecycle integration tests");
+  console.log("   Run inside herdr (HERDR_ENV=1) or the Herdr app to enable these tests.");
 }
 
 for (const backend of backends) {

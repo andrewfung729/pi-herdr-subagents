@@ -1,21 +1,29 @@
 /**
- * Integration tests for the herdr surface layer.
+ * Integration tests for the terminal surface layer (Herdr app or herdr).
  *
- * These tests exercise real herdr operations: creating panes,
+ * These tests exercise real pane operations: creating panes,
  * sending commands, reading screen output, and closing panes.
  * No LLM calls — fast and free.
  *
- * Run inside herdr:
- *   herdr 'npm run test:integration'
+ * Run from a Herdr app pane or a herdr pane:
+ *   pnpm run test:surface
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { unlinkSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
+import { pollForExit } from "../../pi-extension/subagents/herdr.ts";
+import {
+  appTerminalStateAsync,
+  decodeAppSurface,
+  paneForTerminal,
+} from "../../pi-extension/subagents/herdr-app.ts";
 import {
   cleanupTestEnv,
   closeSurface,
   createTestEnv,
+  createTrackedLaunchSurface,
   createTrackedSurface,
   createTrackedSurfaceSplit,
   getAvailableBackends,
@@ -38,8 +46,38 @@ const backends = getAvailableBackends();
 const SHELL_READY_DELAY_MS = Number(process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS ?? "1500");
 
 if (backends.length === 0) {
-  console.log("⚠️  herdr is not available — skipping herdr-surface integration tests");
-  console.log("   Run inside herdr (HERDR_ENV=1) to enable these tests.");
+  console.log("⚠️  no herdr or herdr-app surface — skipping herdr-surface integration tests");
+  console.log("   Run inside herdr (HERDR_ENV=1) or the Herdr app to enable these tests.");
+}
+
+function focusedAppPane(): string | null {
+  try {
+    const pane = JSON.parse(
+      execFileSync("herdr-app", ["status"], { encoding: "utf8" }),
+    )?.focused_pane;
+    return typeof pane === "string" ? pane : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Tab id holding `pane` in the Herdr app (`herdr-app ls`), or null. */
+function appTabOfPane(pane: string): string | null {
+  const layout = JSON.parse(execFileSync("herdr-app", ["ls"], { encoding: "utf8" }));
+  const contains = (nodes: any[] | undefined): boolean =>
+    (nodes ?? []).some((node) => node.pane === pane || contains(node.sub_agents));
+  for (const space of layout.spaces ?? []) {
+    for (const tab of space.tabs ?? []) {
+      if (contains(tab.terminals)) return tab.id;
+    }
+  }
+  return null;
+}
+
+function appPane(surface: string): string {
+  const ref = decodeAppSurface(surface);
+  assert.ok(ref, `Expected a Herdr app surface, got ${surface}`);
+  return ref.pane;
 }
 
 for (const backend of backends) {
@@ -54,7 +92,9 @@ for (const backend of backends) {
       cleanupTestEnv(env);
     });
 
-    it("keeps the parent left and stacks subagent surfaces on the right", async () => {
+    it("keeps the parent left and stacks subagent surfaces on the right", {
+      skip: backend !== "herdr",
+    }, async () => {
       const caller = getCurrentPaneId();
       const focusBefore = getFocusedSurface();
       assert.ok(focusBefore !== null, "Expected a focused pane in the herdr session");
@@ -100,8 +140,68 @@ for (const backend of backends) {
       assert.equal(getCurrentPaneId(), caller);
     });
 
+    it("splits in the caller's tab and keeps focus", {
+      skip: backend !== "herdr-app",
+    }, async () => {
+      const caller = paneForTerminal(process.env.HC_TERMINAL_ID ?? "");
+      const tab = appTabOfPane(caller.pane);
+      assert.ok(tab, "Expected the caller's pane in herdr-app ls");
+      const focusBefore = focusedAppPane();
+
+      const childA = createTrackedSurface(env, "app-child-a");
+      const childB = createTrackedSurfaceSplit(env, "app-child-b", "down", childA);
+      assert.equal(appTabOfPane(appPane(childA)), tab);
+      assert.equal(appTabOfPane(appPane(childB)), tab);
+      assert.equal(focusedAppPane(), focusBefore);
+
+      await sleep(SHELL_READY_DELAY_MS);
+      const marker = uniqueId();
+      sendCommand(childB, `echo "APP_B_${marker}"`);
+      await waitForScreen(childB, new RegExp(`APP_B_${marker}`), 20_000, 50);
+      assert.equal(focusedAppPane(), focusBefore);
+    });
+
+    it("runs a launch pane's handed-off script and reports its sentinel", {
+      skip: backend !== "herdr-app",
+    }, async () => {
+      const surface = createTrackedLaunchSurface(env, "app-launch");
+      const marker = uniqueId();
+      // No shell-ready delay: the bootstrap waits for the handoff file.
+      sendLongCommand(surface, `echo "LAUNCH_${marker}"; echo '__SUBAGENT_DONE_'7'__'`);
+      const result = await pollForExit(surface, AbortSignal.timeout(30_000), { interval: 300 });
+      assert.deepEqual(result, { reason: "sentinel", exitCode: 7 });
+      const screen = readScreen(surface, 50);
+      assert.ok(screen.includes(`LAUNCH_${marker}`), `Expected launch output. Got:\n${screen}`);
+
+      // The script's exit ends the terminal, and the app closes the pane.
+      const start = Date.now();
+      while ((await appTerminalStateAsync(surface)) === "live" && Date.now() - start < 10_000) {
+        await sleep(200);
+      }
+      assert.equal(await appTerminalStateAsync(surface), "gone");
+      assert.equal(appTabOfPane(appPane(surface)), null);
+    });
+
+    it("reports a launch pane closed mid-run as pane-gone", {
+      skip: backend !== "herdr-app",
+    }, async () => {
+      const surface = createTrackedLaunchSurface(env, "app-closed");
+      sendLongCommand(surface, "sleep 60; echo '__SUBAGENT_DONE_'$?'__'");
+      await sleep(1500);
+      execFileSync("herdr-app", ["do", "pane.close", "--pane", appPane(surface)], {
+        encoding: "utf8",
+      });
+      const result = await pollForExit(surface, AbortSignal.timeout(30_000), { interval: 300 });
+      assert.equal(result.reason, "error");
+      assert.match(result.errorMessage ?? "", /pane_not_found/);
+    });
+
     it("creates a surface, sends a command, reads output, and closes it", async () => {
+      const focusBefore = backend === "herdr-app" ? focusedAppPane() : null;
       const surface = createTrackedSurface(env, "echo-test");
+      if (backend === "herdr-app") {
+        assert.equal(focusedAppPane(), focusBefore);
+      }
       await sleep(SHELL_READY_DELAY_MS);
 
       const marker = uniqueId();
@@ -212,7 +312,7 @@ for (const backend of backends) {
       await sleep(SHELL_READY_DELAY_MS);
       closeSurface(surface);
       untrackSurface(env, surface);
-      // A pane closed from the herdr UI must not fail the watcher's cleanup.
+      // A pane closed from the UI must not fail the watcher's cleanup.
       closeSurface(surface);
     });
   });

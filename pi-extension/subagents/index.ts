@@ -28,9 +28,10 @@ import {
   muxSetupHint,
   pollForExit,
   readScreen,
-  sendCommand,
+  sendCommandAsync,
   sendLongCommand,
   shellEscape,
+  surfaceNeedsShellReadyDelay,
 } from "./herdr.ts";
 import { formatModelMenu, resolveSpawnModel, type SessionModel } from "./models.ts";
 import { mergeExtensionPaths, resolvePackageExtensions } from "./packages.ts";
@@ -548,12 +549,17 @@ function getShellReadyDelayMs(): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 500;
 }
 
+/** Shell-ready delay for a new pane; Herdr app launch panes need none. */
+function shellReadyDelayFor(surface: string): number {
+  return surfaceNeedsShellReadyDelay(surface) ? getShellReadyDelayMs() : 0;
+}
+
 function muxUnavailableResult() {
   return {
     content: [
       {
         type: "text" as const,
-        text: `Subagents require herdr. ${muxSetupHint()}`,
+        text: `Subagents require the Herdr app or herdr. ${muxSetupHint()}`,
       },
     ],
     details: { error: "herdr not available" },
@@ -708,7 +714,10 @@ function selectSubagentSurfaceAnchor(): string | undefined {
  */
 function createSubagentSurface(name: string, cwd?: string): string {
   const anchor = selectSubagentSurfaceAnchor();
-  const surface = anchor ? createSurfaceSplit(name, "down", anchor, cwd) : createSurface(name, cwd);
+  const options = { launch: true };
+  const surface = anchor
+    ? createSurfaceSplit(name, "down", anchor, cwd, options)
+    : createSurface(name, cwd, options);
   launchingSubagentSurfaces.add(surface);
   return surface;
 }
@@ -1259,27 +1268,29 @@ function resolveRunningByName(name: string): { running: RunningSubagent } | { er
  * collapsed to spaces because each newline submits a turn in the child's TUI
  * editor; a multi-line message would otherwise fire as several partial turns.
  */
-function steerSubagent(
+type SteerSend = (surface: string, command: string) => void | Promise<void>;
+
+async function steerSubagent(
   running: RunningSubagent,
   message: string,
-  send: (surface: string, command: string) => void = sendCommand,
-): { ok: true } | { error: string } {
+  send: SteerSend = sendCommandAsync,
+): Promise<{ ok: true } | { error: string }> {
   const flattened = message.replace(/\s*\n\s*/g, " ").trim();
   try {
-    send(running.surface, flattened);
+    await send(running.surface, flattened);
     return { ok: true };
   } catch (error: any) {
     return {
       error:
-        `Failed to deliver message to subagent "${running.name}" via herdr: ` +
+        `Failed to deliver message to subagent "${running.name}" via its pane: ` +
         `${error?.message ?? String(error)}`,
     };
   }
 }
 
-function handleSubagentSteer(
+async function handleSubagentSteer(
   params: { name?: string; message?: string },
-  send: (surface: string, command: string) => void = sendCommand,
+  send: SteerSend = sendCommandAsync,
 ) {
   const message = params.message?.trim();
   if (!message) {
@@ -1299,7 +1310,7 @@ function handleSubagentSteer(
   const now = Date.now();
   observeRunningSubagent(running, now);
 
-  const steer = steerSubagent(running, message, send);
+  const steer = await steerSubagent(running, message, send);
   if ("error" in steer) {
     return {
       content: [{ type: "text" as const, text: steer.error }],
@@ -1517,7 +1528,7 @@ async function launchSubagent(
   const surface = options?.surface ?? createSubagentSurface(params.name, ctx.cwd);
   if (!surfacePreCreated) {
     try {
-      await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
+      await new Promise<void>((resolve) => setTimeout(resolve, shellReadyDelayFor(surface)));
     } finally {
       launchingSubagentSurfaces.delete(surface);
     }
@@ -1991,10 +2002,12 @@ async function watchSubagent(
 }
 
 export default function subagentsExtension(pi: ExtensionAPI) {
-  // Do not expose tools that cannot work outside herdr. Keeping this check at
-  // registration time prevents the model from seeing and attempting unusable
-  // subagent tools in a regular terminal. Execution-time checks remain below
-  // as a defensive guard in case herdr becomes unavailable after startup.
+  // Register nothing unless this process is in a confirmed Herdr app or herdr
+  // pane. getHerdrRuntimeStatus checks each surface the environment points at
+  // and reports `outside-herdr` or `missing` when no pane can be confirmed
+  // (a regular terminal, a closed Herdr app window, leaked HERDR_ENV or
+  // HC_TERMINAL_ID), so the model never sees unusable subagent tools.
+  // Execution-time checks remain below as a defensive guard.
   const herdrStatus = getHerdrRuntimeStatus();
   if (herdrStatus.kind === "outside-herdr" || herdrStatus.kind === "missing") return;
 
@@ -2574,7 +2587,7 @@ function registerSubagentsExtension(pi: ExtensionAPI, herdrCompatibilityWarning?
       // pane cwd and the resumed command's `cd` (loadout.cwd) agree.
       const surface = createSubagentSurface(name, loadout.cwd ?? ctx.cwd);
       try {
-        await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
+        await new Promise<void>((resolve) => setTimeout(resolve, shellReadyDelayFor(surface)));
       } finally {
         launchingSubagentSurfaces.delete(surface);
       }

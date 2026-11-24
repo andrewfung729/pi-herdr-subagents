@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,8 +14,24 @@ import {
 import {
   __herdrVersionTest__,
   __pollForExitTest__,
+  herdrPaneCheckSaysOutside,
   shellEscape,
+  surfaceBackendFromEnv,
+  surfaceCandidatesFromEnv,
+  surfaceNeedsShellReadyDelay,
 } from "../pi-extension/subagents/herdr.ts";
+import {
+  classifyAppTerminal,
+  classifyHcError,
+  classifyHerdrAppVersions,
+  decodeAppSurface,
+  encodeAppSurface,
+  handOffAppLaunch,
+  isPendingAppLaunch,
+  launchBootstrapArgv,
+  parseAppReadOutput,
+  pendingLaunchPath,
+} from "../pi-extension/subagents/herdr-app.ts";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import {
   formatModelMenu,
@@ -2520,7 +2538,9 @@ describe("commands", () => {
 describe("tool registration", () => {
   it("does not register tools or commands outside herdr", () => {
     const originalHerdrEnv = process.env.HERDR_ENV;
+    const originalHcTerminal = process.env.HC_TERMINAL_ID;
     delete process.env.HERDR_ENV;
+    delete process.env.HC_TERMINAL_ID;
 
     try {
       const { api, registeredTools, registeredCommands, registeredMessageRenderers } =
@@ -2532,6 +2552,26 @@ describe("tool registration", () => {
       assert.deepEqual(registeredMessageRenderers, []);
     } finally {
       restoreEnvVar("HERDR_ENV", originalHerdrEnv);
+      restoreEnvVar("HC_TERMINAL_ID", originalHcTerminal);
+    }
+  });
+  it("does not register tools when HC_TERMINAL_ID has no Herdr app pane", () => {
+    const originalHerdrEnv = process.env.HERDR_ENV;
+    const originalHcTerminal = process.env.HC_TERMINAL_ID;
+    delete process.env.HERDR_ENV;
+    process.env.HC_TERMINAL_ID = "t-no-such-terminal-for-pi-tests";
+
+    try {
+      const { api, registeredTools, registeredCommands, registeredMessageRenderers } =
+        createMockExtensionApi();
+      (subagentsModule as any).default(api);
+
+      assert.deepEqual(registeredTools, []);
+      assert.deepEqual(registeredCommands, []);
+      assert.deepEqual(registeredMessageRenderers, []);
+    } finally {
+      restoreEnvVar("HERDR_ENV", originalHerdrEnv);
+      restoreEnvVar("HC_TERMINAL_ID", originalHcTerminal);
     }
   });
 
@@ -3044,13 +3084,13 @@ describe("subagent interruption", () => {
     }
   });
 
-  it("steers a running subagent by typing into its pane (newlines flattened)", () => {
+  it("steers a running subagent by typing into its pane (newlines flattened)", async () => {
     const testApi = (subagentsModule as any).__test__;
     let sentSurface = "";
     let sentText = "";
     const running = makeRunning();
 
-    const result = testApi.steerSubagent(
+    const result = await testApi.steerSubagent(
       running,
       "do this\nthen that",
       (surface: string, text: string) => {
@@ -3064,18 +3104,18 @@ describe("subagent interruption", () => {
     assert.equal(sentText, "do this then that");
   });
 
-  it("returns an explicit error when steering delivery fails", () => {
+  it("returns an explicit error when steering delivery fails", async () => {
     const testApi = (subagentsModule as any).__test__;
     const running = makeRunning();
 
-    const result = testApi.steerSubagent(running, "hi", () => {
+    const result = await testApi.steerSubagent(running, "hi", () => {
       throw new Error("mux write failed");
     });
 
     assert.match(result.error, /Failed to deliver message/);
   });
 
-  it("delivers a steer message and forces local status waiting", () => {
+  it("delivers a steer message and forces local status waiting", async () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
     let sentSurface = "";
@@ -3100,7 +3140,7 @@ describe("subagent interruption", () => {
     try {
       runningMap.set("a1", makeRunning({ statusState: activeState }));
 
-      const result = withMockedNow(20_000, () =>
+      const result = await withMockedNow(20_000, () =>
         testApi.handleSubagentSteer(
           { name: "Worker", message: "keep going" },
           (surface: string, text: string) => {
@@ -3125,20 +3165,20 @@ describe("subagent interruption", () => {
     }
   });
 
-  it("requires a message when steering", () => {
+  it("requires a message when steering", async () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
     runningMap.clear();
     try {
       runningMap.set("a1", makeRunning());
-      const result = testApi.handleSubagentSteer({ name: "Worker", message: "  " }, () => {});
+      const result = await testApi.handleSubagentSteer({ name: "Worker", message: "  " }, () => {});
       assert.match(result.content[0].text, /`message` is required/);
     } finally {
       runningMap.clear();
     }
   });
 
-  it("leaves status unchanged when steering delivery fails in the tool path", () => {
+  it("leaves status unchanged when steering delivery fails in the tool path", async () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
     runningMap.clear();
@@ -3161,7 +3201,7 @@ describe("subagent interruption", () => {
     try {
       runningMap.set("a1", makeRunning({ statusState: activeState }));
 
-      const result = withMockedNow(20_000, () =>
+      const result = await withMockedNow(20_000, () =>
         testApi.handleSubagentSteer({ name: "Worker", message: "go" }, () => {
           throw new Error("mux write failed");
         }),
@@ -3701,6 +3741,169 @@ describe("herdr.ts", () => {
       assert.equal(status.kind, "unsupported");
       assert.equal(status.compatible, false);
       assert.match(status.message ?? "", /Could not parse/);
+    });
+  });
+
+  describe("surface backend", () => {
+    it("checks herdr first when both environments are set", () => {
+      assert.equal(surfaceBackendFromEnv({ HERDR_ENV: "1", HC_TERMINAL_ID: "t1" }), "herdr");
+      assert.deepEqual(surfaceCandidatesFromEnv({ HERDR_ENV: "1", HC_TERMINAL_ID: "t1" }), [
+        "herdr",
+        "herdr-app",
+      ]);
+    });
+
+    it("selects the Herdr app from HC_TERMINAL_ID", () => {
+      assert.equal(surfaceBackendFromEnv({ HC_TERMINAL_ID: "t47" }), "herdr-app");
+    });
+
+    it("is outside a regular terminal", () => {
+      assert.equal(surfaceBackendFromEnv({}), "outside");
+      assert.deepEqual(surfaceCandidatesFromEnv({}), []);
+    });
+
+    it("reads a missing herdr server or pane as outside herdr", () => {
+      const err = Object.assign(new Error("Command failed: herdr pane current"), {
+        stdout: '{"error":{"code":"server_not_running","message":"no herdr server"}}',
+      });
+      assert.equal(herdrPaneCheckSaysOutside(err), true);
+      assert.equal(herdrPaneCheckSaysOutside(new Error("pane_not_found")), true);
+      assert.equal(
+        herdrPaneCheckSaysOutside(new Error("unrecognized subcommand 'current'")),
+        false,
+      );
+    });
+  });
+
+  describe("herdr-app surface ids", () => {
+    it("round-trips pane and terminal ids, including machine prefixes", () => {
+      const id = encodeAppSurface({ pane: "viki-code2/pabc", terminal: "viki-code2/t15" });
+      assert.deepEqual(decodeAppSurface(id), {
+        pane: "viki-code2/pabc",
+        terminal: "viki-code2/t15",
+      });
+    });
+
+    it("round-trips the creation pid and launch token", () => {
+      const id = encodeAppSurface({ pane: "p1", terminal: "t1", pid: 4222, launch: "abc123" });
+      assert.deepEqual(decodeAppSurface(id), {
+        pane: "p1",
+        terminal: "t1",
+        pid: 4222,
+        launch: "abc123",
+      });
+      const noPid = encodeAppSurface({ pane: "p1", terminal: "t1", launch: "ff" });
+      assert.deepEqual(decodeAppSurface(noPid), { pane: "p1", terminal: "t1", launch: "ff" });
+    });
+
+    it("rejects malformed ids and leaves herdr pane ids alone", () => {
+      assert.equal(decodeAppSurface("w1:p3"), null);
+      assert.equal(decodeAppSurface("herdr-app|p1"), null);
+      assert.equal(decodeAppSurface("herdr-app|p1|t1|notapid"), null);
+      assert.equal(decodeAppSurface("herdr-app|p1|t1|1|not-hex!"), null);
+    });
+
+    it("needs a shell-ready delay only before a launch handoff", () => {
+      assert.equal(surfaceNeedsShellReadyDelay("w1:p3"), true);
+      assert.equal(
+        surfaceNeedsShellReadyDelay(encodeAppSurface({ pane: "p", terminal: "t" })),
+        true,
+      );
+      assert.equal(
+        surfaceNeedsShellReadyDelay(encodeAppSurface({ pane: "p", terminal: "t", launch: "0a" })),
+        false,
+      );
+    });
+  });
+
+  describe("herdr-app errors and state", () => {
+    it("classifies hc exit codes and JSON error kinds", () => {
+      assert.equal(classifyHcError({ status: 3 }), "not_found");
+      assert.equal(classifyHcError({ code: 11 }), "finished");
+      assert.equal(classifyHcError({ status: 9 }), "blocked");
+      assert.equal(
+        classifyHcError({ status: 1, stderr: '{"error":{"kind":"not_found","message":"x"}}' }),
+        "not_found",
+      );
+      assert.equal(classifyHcError(new Error("boom")), "other");
+    });
+
+    it("treats a finished, missing or replaced terminal as not live", () => {
+      assert.equal(classifyAppTerminal({ state: "live", pid: 10 }, 10), "live");
+      assert.equal(classifyAppTerminal({ state: "live", pid: 10 }), "live");
+      assert.equal(classifyAppTerminal({ state: "finished", pid: 10 }, 10), "gone");
+      assert.equal(classifyAppTerminal({ error: { kind: "not_found" } }, 10), "gone");
+      assert.equal(classifyAppTerminal({ state: "live", pid: 11 }, 10), "replaced");
+    });
+
+    it("reads screen text from hc read --json and drops hc notes", () => {
+      const json = JSON.stringify({
+        complete: false,
+        how: "screen",
+        text: "a\nb\n__SUBAGENT_DONE_0__\n\n",
+      });
+      assert.equal(parseAppReadOutput(json), "a\nb\n__SUBAGENT_DONE_0__");
+      assert.equal(
+        parseAppReadOutput("x\ny\n[hc] only its screen: it is working; read again once it stops\n"),
+        "x\ny",
+      );
+    });
+  });
+
+  describe("herdr-app versions", () => {
+    it("supports the tested versions and newer patches", () => {
+      assert.equal(classifyHerdrAppVersions("herdr-app 0.1.17", "hc 0.1.22").kind, "supported");
+      assert.equal(classifyHerdrAppVersions("herdr-app 0.1.30", "hc 0.1.40").kind, "supported");
+    });
+
+    it("warns on a newer minor and refuses older versions", () => {
+      assert.equal(classifyHerdrAppVersions("herdr-app 0.2.0", "hc 0.1.22").kind, "untested");
+      const old = classifyHerdrAppVersions("herdr-app 0.1.16", "hc 0.1.22");
+      assert.equal(old.kind, "unsupported");
+      assert.match(old.message ?? "", /herdr-app 0\.1\.16 is too old/);
+      assert.equal(classifyHerdrAppVersions("", "hc 0.1.22").kind, "unsupported");
+    });
+  });
+
+  describe("herdr-app launch handoff", () => {
+    it("runs the handed-off script through the bootstrap", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-app-launch-"));
+      const token = randomBytes(6).toString("hex");
+      const surface = encodeAppSurface({ pane: "p-test", terminal: "t-test", launch: token });
+      const script = join(dir, "launch.sh");
+      writeFileSync(script, "echo launched-from-handoff; exit 7\n");
+      const [bin, ...args] = launchBootstrapArgv(pendingLaunchPath(token));
+      const run = new Promise<{ code: number | null; out: string }>((resolve) => {
+        const child = spawn(bin, args, {
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir, SHELL: "/bin/bash" },
+        });
+        let out = "";
+        child.stdout.on("data", (chunk) => {
+          out += chunk;
+        });
+        child.on("close", (code) => resolve({ code, out }));
+      });
+      try {
+        assert.equal(isPendingAppLaunch(surface), true);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        assert.equal(handOffAppLaunch(surface, script), true);
+        assert.equal(isPendingAppLaunch(surface), false);
+        assert.equal(handOffAppLaunch(surface, script), false);
+        const { code, out } = await run;
+        assert.match(out, /launched-from-handoff/);
+        assert.equal(code, 7);
+        assert.equal(existsSync(pendingLaunchPath(token)), false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not hand off to an ordinary pane", () => {
+      assert.equal(
+        handOffAppLaunch(encodeAppSurface({ pane: "p", terminal: "t" }), "/x.sh"),
+        false,
+      );
+      assert.equal(handOffAppLaunch("w1:p3", "/x.sh"), false);
     });
   });
 

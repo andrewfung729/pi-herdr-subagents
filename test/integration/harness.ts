@@ -26,7 +26,7 @@ import {
   closeSurface,
   createSurface,
   createSurfaceSplit,
-  isMuxAvailable,
+  getHerdrRuntimeStatus,
   readScreen,
   readScreenAsync,
   sendCommand,
@@ -76,14 +76,16 @@ export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 // ── Backend detection ──
 
 /**
- * Detect whether herdr is available in the current environment.
- * Returns ["herdr"] or [].
+ * Detect which terminal surface is available.
+ * Returns `["herdr"]`, `["herdr-app"]`, or `[]`.
  */
 export function getAvailableBackends(): string[] {
-  return isMuxAvailable() ? ["herdr"] : [];
+  const status = getHerdrRuntimeStatus();
+  if (!status.compatible || !status.backend) return [];
+  return [status.backend];
 }
 
-/** The calling pane's id (`w1:p1`-style) — the pane running the tests. */
+/** herdr only: the calling pane's id (`w1:p1`-style) — the pane running the tests. */
 export function getCurrentPaneId(): string {
   const stdout = execFileSync("herdr", ["pane", "current"], { encoding: "utf8" });
   const paneId = JSON.parse(stdout)?.result?.pane?.pane_id;
@@ -92,7 +94,7 @@ export function getCurrentPaneId(): string {
   return paneId;
 }
 
-/** The currently focused pane id in the session, or null. */
+/** herdr only: the currently focused pane id in the session, or null. */
 export function getFocusedSurface(): string | null {
   try {
     const stdout = execFileSync("herdr", ["pane", "list"], { encoding: "utf8" });
@@ -199,6 +201,16 @@ export function cleanupTestEnv(env: TestEnv): void {
  */
 export function createTrackedSurface(env: TestEnv, name: string): string {
   const surface = createSurface(name);
+  env.surfaces.push(surface);
+  return surface;
+}
+
+/**
+ * Create a launch surface (`createSurface(..., { launch: true })`) and track
+ * it. In the Herdr app it runs exactly one `sendLongCommand` script.
+ */
+export function createTrackedLaunchSurface(env: TestEnv, name: string): string {
+  const surface = createSurface(name, undefined, { launch: true });
   env.surfaces.push(surface);
   return surface;
 }

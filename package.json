@@ -1,7 +1,7 @@
 {
   "name": "pi-herdr-subagents",
   "version": "0.1.0",
-  "description": "Async subagents for pi, running in herdr panes — spawn, orchestrate, and steer results back without blocking the main session",
+  "description": "Async subagents for pi, running in Herdr app or herdr panes — spawn, orchestrate, and steer results back without blocking the main session",
   "keywords": [
     "pi-package"
   ],
